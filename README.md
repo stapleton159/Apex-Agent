@@ -20,6 +20,8 @@ APEX drives a model through a real assessment against a target you name, one too
 
 It is not a scanner wrapper. There is no step ceiling, no "report generated" step, and no way for the model to write a finding into the report that the evidence gate has not independently replayed.
 
+APEX was built out of a need for a cheap, effective, and truly modular autonomous harness. Rather than relying on heavy, token-expensive multi-agent "swarms" that generate high API overhead, APEX uses a streamlined single-agent loop coupled with a deterministic Evidence Gate. We believe that democratizing AI security tooling requires eliminating bloat, enforcing hard exploit verification over model guesswork, and ensuring high-potency autonomous execution remains accessible and cost-effective for independent researchers.
+
 > [!WARNING]
 > **APEX is an offensive-security tool.** Run it only against systems you own or are explicitly authorized in writing to test. The dashboard has no authentication and exposes file upload, shell execution and a self-editing code path — bind it to `127.0.0.1` and treat the port as a root-equivalent interface. See [Authorized use](#-authorized-use).
 
