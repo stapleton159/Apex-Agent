@@ -1,0 +1,22 @@
+# APEX — core runtime
+# Install:  python -m pip install -r requirements.txt
+#
+# Ranges, not pins: this app is a long-lived operator tool and the constraints
+# here are the ones the code actually depends on (Flask's route/jsonify API,
+# requests' Session behaviour, dnspython 2.x resolver API, bs4 4.x parser API).
+
+# --- required -------------------------------------------------------------
+Flask>=2.2,<4
+requests>=2.28,<3
+urllib3>=1.26,<3
+beautifulsoup4>=4.11,<5
+dnspython>=2.3,<3
+
+# --- optional -------------------------------------------------------------
+# Browser control. Without it the harness still works: the browser tool
+# degrades to CDP, then to the agent-browser CLI, then to a static text fetch.
+#   pip install playwright && playwright install chromium
+# playwright>=1.40
+#
+# CDP backend for an already-running Chrome (set APEX_CHROME_CDP=ws://...).
+# websockets>=10

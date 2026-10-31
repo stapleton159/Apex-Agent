@@ -1,0 +1,1726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0d12">
+<title>APEX</title>
+<style>
+  :root{
+    --bg:#0a0d12; --panel:#11161e; --panel-2:#151b25; --line:#1f2937;
+    --txt:#dbe3ec; --dim:#8b98a8; --faint:#5b6573;
+    --accent:#4f9cf9; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --think:#79c0ff; --plan:#d2a8ff; --exec:#7ee787; --data:#e3b341;
+    --r:12px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif;
+    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
+  }
+  button{font:inherit; color:inherit; cursor:pointer}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---------- top bar ---------- */
+  /* The header is a fixed-height row that never wraps. It used to wrap and
+     shrink (flex-shrink defaults to 1), so on a phone the button row was
+     squeezed past the edge of the fixed-height body and the first line got
+     clipped under the safe-area padding. */
+  header{
+    display:flex; align-items:center; gap:8px; flex-wrap:nowrap;
+    flex:0 0 auto; min-height:52px;
+    padding:calc(7px + env(safe-area-inset-top)) 10px 7px;
+    background:var(--panel); border-bottom:1px solid var(--line);
+    position:relative; z-index:20;
+  }
+  .brand{
+    display:flex; align-items:center; gap:8px; flex:0 0 auto;
+    font-weight:700; letter-spacing:2px; font-size:15px; white-space:nowrap
+  }
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.on{background:var(--good); box-shadow:0 0 8px var(--good)}
+  .dot.err{background:var(--warn); box-shadow:0 0 8px var(--warn)}
+  .pill{
+    flex:0 1 auto; min-width:0; max-width:34vw;
+    font-size:11px; padding:4px 9px; border-radius:999px; border:1px solid var(--line);
+    background:var(--panel-2); color:var(--dim); white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; line-height:1.35
+  }
+  .pill.run{color:#0a0d12;background:var(--good);border-color:var(--good);font-weight:700}
+  .pill.done{color:#0a0d12;background:var(--accent);border-color:var(--accent);font-weight:700}
+  .pill.stop{color:#0a0d12;background:var(--warn);border-color:var(--warn);font-weight:700}
+  .spacer{flex:1 1 auto; min-width:0}
+  .hactions{display:flex; align-items:center; gap:6px; flex:0 0 auto}
+  .hbtn{
+    background:var(--panel-2); border:1px solid var(--line); border-radius:9px;
+    padding:7px 11px; font-size:12px; color:var(--dim); min-height:36px;
+    white-space:nowrap; flex:0 0 auto
+  }
+  .hbtn:active{transform:translateY(1px)}
+  .hbtn.danger{color:#ffb4ae; border-color:#5a2b28}
+  /* very narrow phones: keep the row intact, tighten what is expendable */
+  @media (max-width:430px){
+    header{gap:6px; padding-left:8px; padding-right:8px}
+    .brand{letter-spacing:1px; font-size:14px}
+    .hbtn{padding:7px 8px; font-size:11px}
+    .pill{max-width:26vw; padding:4px 7px}
+  }
+  @media (max-width:340px){
+    .brand span:not(.dot){display:none}
+  }
+
+  /* ---------- tabs ---------- */
+  nav{
+    display:flex; gap:6px; padding:8px 12px; background:var(--panel);
+    border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none;
+    flex:0 0 auto;
+  }
+  nav::-webkit-scrollbar{display:none}
+  nav button{
+    flex:1 0 auto; min-width:70px; background:transparent; border:1px solid transparent;
+    color:var(--dim); padding:9px 8px; border-radius:9px; font-size:13px; font-weight:600
+  }
+  nav button[aria-selected="true"]{background:var(--panel-2); border-color:var(--line); color:var(--txt)}
+
+  /* ---------- layout ---------- */
+  main{flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-template-columns:1fr}
+  .panel{display:none; min-height:0; flex-direction:column; overflow:hidden}
+  .panel.active{display:flex}
+  @media (min-width:980px){
+    nav{overflow:visible}
+    main{grid-template-columns:minmax(0,1fr) 400px; gap:1px; background:var(--line)}
+    /* console is pinned left; the selected tab fills the right column */
+    .panel{display:none}
+    .panel.active{display:flex; grid-column:2; grid-row:1}
+    #console{display:flex; grid-column:1; grid-row:1}
+  }
+
+  /* ---------- console ---------- */
+  .toolbar{
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:0 0 auto;
+    padding:8px 12px; border-bottom:1px solid var(--line);
+    background:var(--panel); font-size:12px; color:var(--dim)
+  }
+  .toolbar select, .toolbar input{
+    background:var(--panel-2); border:1px solid var(--line); color:var(--txt);
+    border-radius:8px; padding:5px 8px; font-size:12px
+  }
+  #log{
+    flex:1 1 auto; min-height:0; overflow-y:auto; padding:10px 12px 14px;
+    -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
+  }
+  .ev{display:flex; gap:8px; padding:5px 0; margin:0; align-items:flex-start; animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+  .tag{
+    flex:none; font:600 10px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.5px; padding:1px 7px; border-radius:5px; margin-top:1px;
+    background:#1c2531; color:var(--dim); text-transform:uppercase
+  }
+  .tag.THINK,.tag.META,.tag.MODE{background:#12233b; color:var(--think)}
+  .tag.PLAN{background:#251a35; color:var(--plan)}
+  .tag.EXEC{background:#12301d; color:var(--exec)}
+  .tag.DATA,.tag.SEARCH{background:#2f2510; color:var(--data)}
+  .tag.WARN,.tag.END{background:#3a1a18; color:#ffa198}
+  .tag.LIVE{background:#0f2b45; color:#8fd6ff}
+  .txt{
+    flex:1 1 auto; min-width:0; color:#aebacb; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+    white-space:pre-wrap; word-break:break-word
+  }
+  .txt b{color:var(--txt)}
+  .live{border-left:2px solid var(--accent); padding-left:10px}
+  .live .txt{color:#9fd3ff}
+  .hb{color:var(--faint); font-size:12px; padding:2px 0 2px 26px}
+  #log::-webkit-scrollbar{width:6px}
+  #log::-webkit-scrollbar-thumb{background:#26313f; border-radius:3px}
+
+  /* ---------- composer ---------- */
+  .composer{
+    border-top:1px solid var(--line); background:var(--panel); flex:0 0 auto;
+    padding:9px 12px calc(9px + env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; gap:7px
+  }
+  .crow{display:flex; gap:8px; align-items:flex-end}
+  #msg{
+    flex:1 1 auto; min-height:44px; max-height:38vh; resize:none; overflow-y:auto;
+    background:var(--panel-2); border:1px solid var(--line); color:var(--txt);
+    border-radius:11px; padding:11px 12px; font:14px/1.45 inherit; outline:none
+  }
+  #msg:focus{border-color:var(--accent); box-shadow:0 0 0 3px #4f9cf922}
+  .sbtn{
+    flex:none; min-width:64px; min-height:44px; padding:0 16px; border-radius:11px; border:0;
+    background:var(--accent); color:#04101f; font-weight:700; letter-spacing:.4px
+  }
+  .sbtn:disabled{opacity:.5; cursor:not-allowed}
+  .sbtn.ghost{background:var(--panel-2); color:var(--dim); border:1px solid var(--line); font-weight:600; min-width:auto; padding:0 12px}
+  .hint{font-size:11px; color:var(--faint)}
+  kbd{font:600 10px ui-monospace,monospace; background:#1a212c; border:1px solid var(--line); border-radius:4px; padding:1px 4px}
+
+  /* ---------- files ---------- */
+  .drop{
+    margin:10px 12px; padding:16px; border:1px dashed #2b3a4d; border-radius:var(--r);
+    text-align:center; color:var(--dim); font-size:13px; background:var(--panel-2);
+    transition:border-color .15s, background .15s
+  }
+  .drop.hot{border-color:var(--accent); background:#12223a; color:var(--txt)}
+  .drop strong{display:block; color:var(--txt); margin-bottom:3px; font-size:14px}
+  .flist{flex:1 1 auto; overflow-y:auto; padding:0 12px 14px}
+  .fitem{
+    display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:10px;
+    border:1px solid transparent
+  }
+  .fitem:hover{background:var(--panel-2); border-color:var(--line)}
+  .fitem .ext{
+    flex:none; width:38px; text-align:center; font:600 9px ui-monospace,monospace;
+    color:var(--data); background:#251f10; border-radius:6px; padding:4px 0; text-transform:uppercase
+  }
+  .fitem .meta{flex:1 1 auto; min-width:0}
+  .fitem .nm{font-size:13px; color:var(--txt); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .fitem .sub{font-size:11px; color:var(--faint)}
+  .empty{padding:26px 14px; text-align:center; color:var(--faint); font-size:13px}
+
+  /* ---------- status ---------- */
+  .sbody{flex:1 1 auto; overflow-y:auto; padding:12px}
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(96px,1fr)); gap:8px; margin-bottom:12px}
+  .card{background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:9px 11px}
+  .card .k{font-size:10px; color:var(--faint); text-transform:uppercase; letter-spacing:.7px}
+  .card .v{font:700 18px/1.3 ui-monospace,monospace; margin-top:2px}
+  .card .v.ok{color:var(--good)} .card .v.no{color:var(--warn)}
+  .sec{margin:14px 0 6px; font-size:11px; letter-spacing:1px; color:var(--faint); text-transform:uppercase}
+  .row{display:flex; gap:8px; font-size:12.5px; padding:6px 0; border-bottom:1px solid #161d27}
+  .row:last-child{border-bottom:0}
+  .row .kk{color:var(--faint); flex:none; width:86px}
+  .row .vv{color:#b9c4d2; min-width:0; word-break:break-word}
+  .gate{border-radius:10px; padding:10px 12px; font-size:12.5px; line-height:1.5; border:1px solid}
+  .gate.open{border-color:#1c5a2c; background:#0e1f14; color:#9be29b}
+  .gate.closed{border-color:#5a3418; background:#20160c; color:#ffd79a}
+  .gate ul{margin:6px 0 0 16px; padding:0}
+  .gate li{margin:3px 0}
+  .chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
+  .chip{font-size:11px; color:var(--dim); background:var(--panel-2); border:1px solid var(--line); border-radius:999px; padding:3px 9px}
+  .links{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px}
+  .links a{font-size:12px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px 10px}
+  .toast{
+    position:fixed; left:50%; bottom:calc(14px + env(safe-area-inset-bottom)); transform:translate(-50%,120%);
+    background:#1b2432; border:1px solid var(--line); color:var(--txt); font-size:13px;
+    padding:10px 16px; border-radius:999px; z-index:60; transition:transform .25s ease; max-width:92vw;
+    box-shadow:0 10px 30px #0009
+  }
+  .toast.show{transform:translate(-50%,0)}
+
+  /* ---------- memory / mail / phish ---------- */
+  .bar{
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    padding:8px 12px; border-bottom:1px solid var(--line); background:var(--panel)
+  }
+  .pbody{flex:1 1 auto; min-height:0; overflow-y:auto; padding:12px 12px 18px}
+  .mem{
+    font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap;
+    word-break:break-word; background:var(--panel-2); border:1px solid var(--line);
+    border-radius:10px; padding:10px 11px; margin:0; color:#b9c4d2; max-height:44vh; overflow:auto
+  }
+  .inp{
+    width:100%; background:var(--panel-2); border:1px solid var(--line); color:var(--txt);
+    border-radius:9px; padding:9px 11px; font:14px/1.4 inherit; outline:none; min-height:40px
+  }
+  .inp:focus{border-color:var(--accent); box-shadow:0 0 0 3px #4f9cf922}
+  .frow{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px}
+  .frow.one{grid-template-columns:1fr}
+  .lbl{display:block; font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.7px; margin:0 0 4px}
+  .wide{width:100%; min-height:42px; margin-top:2px}
+  .item{
+    border:1px solid var(--line); background:var(--panel-2); border-radius:10px;
+    padding:9px 11px; margin-bottom:7px
+  }
+  .item:hover{border-color:#2b3a4d}
+  .item.sel{border-color:var(--accent); background:#12223a}
+  .item .t{font-size:13px; color:var(--txt); word-break:break-word}
+  .item .s{font-size:11px; color:var(--faint); margin-top:2px; white-space:pre-wrap; word-break:break-word}
+  .tagline{font-size:11px; color:var(--dim)}
+  .tagline.ok{color:var(--good)} .tagline.bad{color:var(--bad)}
+  .hbtn.accent{color:#04101f; background:var(--accent); border-color:var(--accent); font-weight:700}
+  .tunrow{
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 0 2px;
+    border:1px solid #1c5a2c; background:#0e1f14; border-radius:10px; padding:9px 11px
+  }
+  .tunrow .lbl{margin:0}
+  .tunlink{
+    flex:1 1 160px; min-width:0; font:600 12px ui-monospace,monospace; color:#9be29b;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap
+  }
+  .tunrow .hbtn{padding:6px 9px; font-size:11px}
+
+  /* ---------- oracle persona ---------- */
+  nav{-webkit-overflow-scrolling:touch}
+  .orcwrap{display:grid; grid-template-columns:220px minmax(0,1fr); gap:14px; align-items:start}
+  @media (max-width:760px){ .orcwrap{grid-template-columns:minmax(0,1fr)} }
+  .orcstage{
+    position:relative; display:flex; flex-direction:column; align-items:center; gap:10px;
+    padding:16px 10px 14px; border:1px solid var(--line); border-radius:14px; overflow:hidden;
+    background:radial-gradient(circle at 50% 34%, #10233a 0%, #0a1220 58%, #070c14 100%);
+    perspective:700px; touch-action:none; user-select:none
+  }
+  .orcstage::after{
+    content:''; position:absolute; left:50%; bottom:8px; width:56%; height:16px; transform:translateX(-50%);
+    background:radial-gradient(ellipse at center, rgba(56,189,248,.30), rgba(56,189,248,0) 70%); filter:blur(2px)
+  }
+  .orb{
+    --ry:0deg; --rx:8deg; position:relative; width:132px; height:132px;
+    transform-style:preserve-3d; transform:rotateX(var(--rx)) rotateY(var(--ry));
+    transition:transform .18s linear
+  }
+  .orb .ring{
+    position:absolute; inset:0; border-radius:50%; border:1px solid rgba(56,189,248,.55);
+    box-shadow:0 0 10px rgba(56,189,248,.22) inset; transform-style:preserve-3d
+  }
+  .orb .r1{transform:rotateY(0deg) rotateX(72deg); border-color:rgba(56,189,248,.75)}
+  .orb .r2{transform:rotateY(60deg) rotateX(72deg); border-color:rgba(129,140,248,.6)}
+  .orb .r3{transform:rotateY(120deg) rotateX(72deg); border-color:rgba(45,212,191,.5)}
+  .orb .core{
+    position:absolute; inset:34px; border-radius:50%;
+    background:radial-gradient(circle at 34% 28%, #dff3ff 0%, #6fd0ff 18%, #1d7fd6 52%, #0b2f57 100%);
+    box-shadow:0 0 18px rgba(56,189,248,.55), 0 0 44px rgba(56,189,248,.22) inset;
+    transform:translateZ(12px)
+  }
+  .orb .iris{
+    position:absolute; inset:52px; border-radius:50%;
+    background:radial-gradient(circle at 50% 50%, #04121f 0 42%, rgba(4,18,31,0) 62%);
+    transform:translateZ(20px); opacity:.85
+  }
+  .orb .spark{
+    position:absolute; inset:-6px; border-radius:50%; pointer-events:none;
+    background:conic-gradient(from 0deg, rgba(56,189,248,0) 0deg, rgba(56,189,248,.35) 40deg, rgba(56,189,248,0) 92deg);
+    filter:blur(2px); opacity:0; transition:opacity .3s
+  }
+  .orcstage[data-state="thinking"] .orb .spark{opacity:1; animation:orbSpin 2.1s linear infinite}
+  .orcstage[data-state="thinking"] .orb{animation:orbPulse 1.5s ease-in-out infinite}
+  .orcstage[data-state="speaking"] .orb .r1{animation:orbSpin 3.4s linear infinite}
+  .orcstage[data-state="speaking"] .orb .core{box-shadow:0 0 26px rgba(45,212,191,.7)}
+  .orcstage[data-state="offline"] .orb .core{filter:grayscale(1) brightness(.6)}
+  @keyframes orbSpin{ from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  @keyframes orbPulse{ 0%,100%{transform:rotateX(var(--rx)) rotateY(var(--ry)) scale(1)} 50%{transform:rotateX(var(--rx)) rotateY(var(--ry)) scale(1.06)} }
+  .orcname{font:700 12px/1 ui-monospace,monospace; letter-spacing:.16em; color:#cbe9ff}
+  .orcstate{font:600 10px/1 ui-monospace,monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--faint)}
+  .orcstate.live{color:var(--good)}
+  .orchint{font-size:10px; color:var(--faint); text-align:center; line-height:1.45; max-width:190px}
+  .orcmain{display:flex; flex-direction:column; gap:10px; min-width:0}
+  .orclog{
+    border:1px solid var(--line); border-radius:12px; background:#080e17; padding:10px;
+    height:min(46vh,420px); overflow-y:auto; display:flex; flex-direction:column; gap:8px
+  }
+  .orcmsg{border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:12.5px; line-height:1.5;
+    white-space:pre-wrap; word-break:break-word; max-width:94%}
+  .orcmsg.me{align-self:flex-end; background:#0f2033; border-color:#1e4a6b; color:#dbeaf7}
+  .orcmsg.ai{align-self:flex-start; background:#0b1522; border-color:#1b3d5c; color:#c9dced}
+  .orcmsg.sys{align-self:center; background:transparent; border-style:dashed; color:var(--faint); font:11px/1.4 ui-monospace,monospace}
+  .orcmsg .who{display:block; font:700 9px/1 ui-monospace,monospace; letter-spacing:.14em; text-transform:uppercase; color:#5f8fb4; margin-bottom:4px}
+  .orcrow{display:flex; gap:8px; align-items:flex-start}
+  .orcrow textarea{
+    flex:1 1 auto; min-width:0; resize:vertical; min-height:44px; max-height:150px; background:#0a121c;
+    color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:9px 10px;
+    font:12.5px/1.45 inherit
+  }
+  .orcrow textarea:focus{outline:none; border-color:#2b6f9c}
+  .orctools{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  .orcswitch{display:flex; align-items:center; gap:7px; font-size:11px; color:var(--dim)}
+  .orcswitch input{width:15px; height:15px; accent-color:#38bdf8}
+  .orcpending{font:11px/1.4 ui-monospace,monospace; color:#e0b45c}
+
+  /* ---------- lab ---------- */
+  .labgrid{display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:12px; align-items:start}
+  @media (max-width:820px){ .labgrid{grid-template-columns:minmax(0,1fr)} }
+  .labfield{display:flex; flex-direction:column; gap:5px; margin-bottom:9px}
+  .labfield label{font:700 9.5px/1 ui-monospace,monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--faint)}
+  .labfield input, .labfield select{
+    background:#0a121c; color:var(--fg); border:1px solid var(--line); border-radius:9px;
+    padding:8px 10px; font:12.5px ui-monospace,monospace; min-width:0
+  }
+  .labfield input:focus, .labfield select:focus{outline:none; border-color:#2b6f9c}
+  .labsrc{
+    width:100%; min-height:190px; resize:vertical; background:#070d15; color:#bfe3c6;
+    border:1px solid var(--line); border-radius:10px; padding:10px;
+    font:12px/1.5 ui-monospace,monospace; tab-size:2
+  }
+  .labsrc:focus{outline:none; border-color:#2b6f9c}
+  .labout{
+    border:1px solid var(--line); border-radius:10px; background:#070d15; color:#cfe6d6;
+    font:11.5px/1.5 ui-monospace,monospace; padding:10px; margin-top:10px;
+    max-height:280px; overflow:auto; white-space:pre-wrap; word-break:break-word
+  }
+  .labout:empty{display:none}
+  .lablist{display:flex; flex-direction:column; gap:6px}
+  .labitem{
+    display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:9px;
+    padding:7px 9px; background:#0a121c; font-size:11.5px; cursor:pointer
+  }
+  .labitem:hover{border-color:#2b6f9c}
+  .labitem .nm{flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font:600 11.5px ui-monospace,monospace; color:#cbe3f5}
+  .labitem .bd{font:10px ui-monospace,monospace; color:var(--faint)}
+  .labitem .bd.ok{color:var(--good)}
+</style>
+</head>
+<body data-toolcount="{{ tools|length }}">
+<header>
+  <div class="brand"><span class="dot" id="conn"></span>APEX</div>
+  <span class="pill" id="stPill">idle</span>
+  <span class="pill" id="modelPill">…</span>
+  <span class="spacer"></span>
+  <div class="hactions">
+    <button class="hbtn" id="btnResume" title="Continue the mission from its checkpointed summary">Continue</button>
+    <button class="hbtn" id="btnStop" title="Stop at the next step boundary">Stop</button>
+    <button class="hbtn danger" id="btnReset" title="Clear history and mission state">Reset</button>
+  </div>
+</header>
+
+<nav role="tablist">
+  <button role="tab" data-tab="console" aria-selected="true">Console</button>
+  <button role="tab" data-tab="memory" aria-selected="false">Memory</button>
+  <button role="tab" data-tab="mail" aria-selected="false">Mail</button>
+  <button role="tab" data-tab="phish" aria-selected="false">Phish</button>
+  <button role="tab" data-tab="files" aria-selected="false">Files</button>
+  <button role="tab" data-tab="status" aria-selected="false">Status</button>
+  <button role="tab" data-tab="oracle" aria-selected="false">Oracle</button>
+  <button role="tab" data-tab="lab" aria-selected="false">Lab</button>
+  <button role="tab" data-tab="selfedit" aria-selected="false">Self-Edit</button>
+</nav>
+
+<main>
+  <section class="panel active" id="console" role="tabpanel" aria-label="Console">
+    <div class="toolbar">
+      <label for="filter" style="color:var(--faint)">show</label>
+      <select id="filter">
+        <option value="all">everything</option>
+        <option value="action">actions only</option>
+        <option value="signal">findings &amp; warnings</option>
+        <option value="live">model output</option>
+      </select>
+      <span class="spacer"></span>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="autoScroll" checked> follow
+      </label>
+      <button class="hbtn" id="btnClear" style="min-height:28px;padding:3px 9px">clear</button>
+    </div>
+    <div id="log" aria-live="polite">
+      <div class="hb" id="boot">connecting to agent stream…</div>
+{% for h in history[-60:] %}
+      <div class="ev"><span class="tag {{ 'PLAN' if h.role == 'user' else 'META' }}">{{ 'YOU' if h.role == 'user' else 'APEX' }}</span><div class="txt">{{ h.content[:700] }}</div></div>
+{% endfor %}
+    </div>
+    <div class="composer">
+      <div class="crow">
+        <textarea id="msg" rows="1" placeholder="Mission directive — e.g. enumerate and test the login endpoint for injection" autocomplete="off"></textarea>
+        <button class="sbtn" id="btnSend">Send</button>
+      </div>
+      <div class="crow" style="gap:8px;align-items:center">
+        <button class="sbtn ghost" id="btnAttach" title="Upload files for the agent to read">＋ File</button>
+        <input type="file" id="fileInput" multiple hidden>
+        <span class="hint"><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+        <span class="spacer"></span>
+        <span class="hint" id="queueHint"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="files" role="tabpanel" aria-label="Workspace files">
+    <div class="drop" id="drop">
+      <strong>Drop files to hand them to the agent</strong>
+      logs, scan exports, screenshots, configs — saved to the workspace and announced to the agent
+      <div style="margin-top:9px"><button class="hbtn" id="btnPick">Choose files</button></div>
+    </div>
+    <div class="flist" id="flist"><div class="empty">loading…</div></div>
+  </section>
+
+  <section class="panel" id="memory" role="tabpanel" aria-label="Mission memory">
+    <div class="bar">
+      <button class="hbtn" id="btnMemRefresh">refresh</button>
+      <button class="hbtn" id="btnResume2" title="Queue the mission again with its checkpointed summary">continue mission</button>
+      <span class="spacer"></span>
+      <span class="tagline" id="memFreeze">—</span>
+      <span class="tagline" id="memUpdated"></span>
+    </div>
+    <div class="pbody">
+      <div class="grid">
+        <div class="card"><div class="k">attempts</div><div class="v" id="memAtt">0</div></div>
+        <div class="card"><div class="k">proven</div><div class="v ok" id="memConf">0</div></div>
+        <div class="card"><div class="k">dead ends</div><div class="v" id="memDead">0</div></div>
+        <div class="card"><div class="k">open ideas</div><div class="v" id="memHyp">0</div></div>
+      </div>
+      <div class="sec">what the model remembers</div>
+      <pre class="mem" id="memBlock">loading…</pre>
+      <div class="sec">checkpoint summary</div>
+      <pre class="mem" id="memSummary">—</pre>
+      <div class="sec">next untried moves</div>
+      <div id="memUntried"></div>
+      <div class="sec">recent attempts</div>
+      <div id="memAttempts"></div>
+      <div class="sec">journal</div>
+      <div id="memJournal"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="mail" role="tabpanel" aria-label="Temporary mail">
+    <div class="bar">
+      <button class="hbtn" id="btnMailRefresh">refresh inbox</button>
+      <span class="spacer"></span>
+      <span class="tagline" id="mailActive">no mailbox</span>
+    </div>
+    <div class="pbody">
+      <div class="frow">
+        <div><label class="lbl" for="mailLabel">label</label>
+          <input class="inp" id="mailLabel" placeholder="apex-signup" autocomplete="off"></div>
+        <div><label class="lbl" for="mailProvider">provider</label>
+          <select class="inp" id="mailProvider">
+            <option value="auto">auto</option>
+            <option value="mail.tm">mail.tm</option>
+            <option value="guerrillamail">guerrillamail</option>
+            <option value="local">local sink</option>
+          </select></div>
+      </div>
+      <button class="hbtn wide" id="btnMailCreate">create mailbox</button>
+      <div class="sec">mailboxes</div>
+      <div id="mailBoxes"></div>
+      <div class="sec">inbox</div>
+      <div id="mailMsgs"></div>
+      <div class="sec">message</div>
+      <pre class="mem" id="mailBody">tap a message to read it</pre>
+    </div>
+  </section>
+
+  <section class="panel" id="phish" role="tabpanel" aria-label="Simulation page and capture server">
+    <div class="bar">
+      <button class="hbtn" id="btnPhishRefresh">refresh</button>
+      <button class="hbtn danger" id="btnPhishStop2">stop server</button>
+      <span class="spacer"></span>
+      <span class="tagline" id="phishState">stopped</span>
+    </div>
+    <div class="pbody">
+      <div class="sec">page builder</div>
+      <div class="frow">
+        <div><label class="lbl" for="phishTemplate">template</label>
+          <select class="inp" id="phishTemplate"><option value="generic">generic</option></select></div>
+        <div><label class="lbl" for="phishPort">port</label>
+          <input class="inp" id="phishPort" value="8088" inputmode="numeric" autocomplete="off"></div>
+      </div>
+      <div class="frow">
+        <div><label class="lbl" for="phishTitle">title</label>
+          <input class="inp" id="phishTitle" placeholder="Sign in" autocomplete="off"></div>
+        <div><label class="lbl" for="phishRedirect">after submit (redirect)</label>
+          <input class="inp" id="phishRedirect" value="https://example.org/" autocomplete="off"></div>
+      </div>
+      <button class="hbtn wide" id="btnPhishBuild">build page</button>
+      <div class="sec">capture server</div>
+      <label class="lbl" for="phishAck">authorization note (required)</label>
+      <input class="inp" id="phishAck" placeholder="authorized simulation for acme.com, scope approved" autocomplete="off">
+      <button class="hbtn wide" id="btnPhishStart">start serving</button>
+      <button class="hbtn wide accent" id="btnPhishTunnel">start + public tunnel (cloudflare)</button>
+      <div class="tunrow" id="phishTunRow" hidden>
+        <span class="lbl">public url</span>
+        <a class="tunlink" id="phishTunUrl" href="#" target="_blank" rel="noopener noreferrer"></a>
+        <button class="hbtn" id="btnPhishTunCopy">copy</button>
+        <button class="hbtn danger" id="btnPhishTunStop">drop tunnel</button>
+      </div>
+      <div class="sec">captures</div>
+      <div id="phishCaps"></div>
+      <div class="sec">pages on disk</div>
+      <div id="phishPages"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="oracle" role="tabpanel" aria-label="Oracle">
+    <div class="sbody">
+      <div class="orcwrap">
+        <div class="orcstage" id="orcStage" data-state="idle">
+          <div class="orb" id="orcOrb" title="drag to rotate">
+            <div class="ring r1"></div>
+            <div class="ring r2"></div>
+            <div class="ring r3"></div>
+            <div class="spark"></div>
+            <div class="core"></div>
+            <div class="iris"></div>
+          </div>
+          <div class="orcname">ORACLE</div>
+          <div class="orcstate" id="orcState">offline</div>
+          <div class="orchint">drag the orb to turn it. it only reads what the harness recorded.</div>
+        </div>
+        <div class="orcmain">
+          <div class="orclog" id="orcLog"></div>
+          <div class="orcrow">
+            <textarea id="orcMsg" rows="2" placeholder="ask about the findings, or say what the agent should do next…"></textarea>
+            <button class="hbtn accent" id="btnOrcSend">send</button>
+          </div>
+          <div class="orctools">
+            <label class="orcswitch"><input type="checkbox" id="orcAuto"> let it steer the main model</label>
+            <span class="orcpending" id="orcPending"></span>
+            <span style="flex:1 1 auto"></span>
+            <button class="hbtn" id="btnOrcReload" title="re-read mission state">reload</button>
+            <button class="hbtn danger" id="btnOrcReset" title="clear the oracle transcript">reset</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="lab" role="tabpanel" aria-label="Lab">
+    <div class="sbody">
+      <div class="tagline" id="labDoc">reading toolchain…</div>
+      <div class="labgrid">
+        <div>
+          <div class="labfield">
+            <label for="labName">name</label>
+            <input id="labName" placeholder="payload_name" spellcheck="false" autocapitalize="off" autocomplete="off">
+          </div>
+          <div class="labfield">
+            <label for="labArgs">args (optional, passed on run)</label>
+            <input id="labArgs" placeholder="127.0.0.1 4444" spellcheck="false" autocapitalize="off" autocomplete="off">
+          </div>
+          <div class="labfield">
+            <label for="labTpl">template</label>
+            <select id="labTpl"></select>
+          </div>
+          <div class="labfield">
+            <label for="labSrc">source</label>
+            <textarea class="labsrc" id="labSrc" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="write, or tick a template and hit write to load it here"></textarea>
+          </div>
+          <div class="orctools">
+            <button class="hbtn" id="btnLabWrite" title="write name + source (or the template) to disk">write</button>
+            <button class="hbtn accent" id="btnLabBuild" title="compile with the local toolchain">build</button>
+            <button class="hbtn" id="btnLabRun" title="run the built artifact with a timeout">run</button>
+            <button class="hbtn" id="btnLabInspect" title="readelf / objdump / strings">inspect</button>
+            <button class="hbtn danger" id="btnLabDel" title="remove the lab entry">delete</button>
+          </div>
+          <div class="labout" id="labOut"></div>
+        </div>
+        <div>
+          <div class="sec">artifacts</div>
+          <div class="lablist" id="labList"></div>
+          <div class="sec">toolchain</div>
+          <div class="tagline" id="labTools">…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="selfedit" role="tabpanel" aria-label="Self-edit the harness">
+    <div class="sbody">
+      <div class="tagline" id="sePhase">idle — describe a capability the harness or the UI does not have yet</div>
+      <div class="labgrid">
+        <div>
+          <div class="labfield">
+            <label for="sePrompt">what to add or change</label>
+            <textarea class="labsrc" id="sePrompt" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="example: add a tab that lists every HTTP request the agent made, with method, url, status and the tool that fired it"></textarea>
+          </div>
+          <div class="labfield">
+            <label for="seIters">iterations (how many fix attempts before it gives up)</label>
+            <input id="seIters" type="number" min="1" max="6" step="1" value="3" style="width:90px">
+          </div>
+          <div class="labfield">
+            <label for="seRestart">restart</label>
+            <label style="display:flex; gap:7px; align-items:center; font:12px ui-monospace,monospace; letter-spacing:0; text-transform:none; color:var(--dim)">
+              <input type="checkbox" id="seRestart" checked style="width:auto; min-width:auto"> restart the server after a validated change
+            </label>
+          </div>
+          <div class="labfield">
+            <label for="seRunPick">rollback target</label>
+            <select id="seRunPick" title="a run id restores every editable file to how it was before that run started">
+              <option value="">current run</option>
+            </select>
+          </div>
+          <div class="orctools">
+            <button class="hbtn accent" id="btnSeStart" title="back up every editable file, then loop: ask the model, patch, validate">start</button>
+            <button class="hbtn" id="btnSeRefresh" title="re-read the run state">refresh</button>
+            <button class="hbtn" id="btnSeStop" title="stop after the current step">stop loop</button>
+            <button class="hbtn danger" id="btnSeRollback" title="restore the sha256-verified backup of every editable file">rollback</button>
+          </div>
+          <div class="labout" id="seOut"></div>
+        </div>
+        <div>
+          <div class="sec">run</div>
+          <div class="tagline" id="seRun">no run yet</div>
+          <div class="sec">change</div>
+          <div class="tagline" id="seSummary">—</div>
+          <div class="sec">validation</div>
+          <div class="lablist" id="seChecks"></div>
+          <div class="sec">files changed</div>
+          <div class="lablist" id="seFiles"></div>
+          <div class="sec">past runs</div>
+          <div class="lablist" id="seRuns"></div>
+        </div>
+      </div>
+      <div class="sec">iterations</div>
+      <div class="lablist" id="seHist"></div>
+      <div class="sec">operations</div>
+      <div class="lablist" id="seOps"></div>
+      <div class="sec">diff against the backup</div>
+      <pre class="labout" id="seDiff" style="max-height:380px"></pre>
+    </div>
+  </section>
+
+  <section class="panel" id="status" role="tabpanel" aria-label="Status">
+    <div class="sbody">
+      <div class="grid">
+        <div class="card"><div class="k">steps</div><div class="v" id="sSteps">0</div></div>
+        <div class="card"><div class="k">requests</div><div class="v" id="sReq">0</div></div>
+        <div class="card"><div class="k">verified</div><div class="v" id="sVer">0</div></div>
+        <div class="card"><div class="k">surfaces</div><div class="v" id="sSurf">0</div></div>
+      </div>
+      <div class="sec">completion gate</div>
+      <div id="gate" class="gate closed">waiting for mission state…</div>
+      <div class="sec">mission</div>
+      <div class="row"><span class="kk">objective</span><span class="vv" id="mObj">—</span></div>
+      <div class="row"><span class="kk">status</span><span class="vv" id="mStat">—</span></div>
+      <div class="row"><span class="kk">contract</span><span class="vv" id="mContract">—</span></div>
+      <div class="row"><span class="kk">queue</span><span class="vv" id="mQueue">0</span></div>
+      <div class="sec">recent missions</div>
+      <div id="mResults"><div class="empty" style="padding:10px 0">none yet</div></div>
+      <div class="sec">inspect</div>
+      <div class="links">
+        <a href="/prompt" target="_blank" rel="noopener">system prompt</a>
+        <a href="/evidence" target="_blank" rel="noopener">evidence ledger</a>
+        <a href="/mission" target="_blank" rel="noopener">mission json</a>
+        <a href="/queue" target="_blank" rel="noopener">queue json</a>
+      </div>
+      <div class="chips" id="capChips"></div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  var log = document.getElementById('log');
+  var conn = document.getElementById('conn');
+  var stPill = document.getElementById('stPill');
+  var modelPill = document.getElementById('modelPill');
+  var autoScroll = document.getElementById('autoScroll');
+  var filter = document.getElementById('filter');
+  var toastEl = document.getElementById('toast');
+  var live = null, liveTxt = null, nodeCount = 0;
+  var MAX_NODES = 1400;
+  var lastBeat = 0;
+
+  function toast(m){
+    toastEl.textContent = m; toastEl.classList.add('show');
+    clearTimeout(toast._t); toast._t = setTimeout(function(){ toastEl.classList.remove('show'); }, 2600);
+  }
+  function nearBottom(){
+    return (log.scrollHeight - log.scrollTop - log.clientHeight) < 90;
+  }
+  function follow(){ if(autoScroll.checked) log.scrollTop = log.scrollHeight; }
+  function trim(){
+    while(log.children.length > MAX_NODES){ log.removeChild(log.firstChild); }
+  }
+  function bucket(tag){
+    if(tag === 'LIVE' || tag === 'META' || tag === 'MODE') return 'live';
+    if(tag === 'EXEC' || tag === 'PLAN' || tag === 'SEARCH' || tag === 'DATA') return 'action';
+    if(tag === 'WARN' || tag === 'END') return 'signal';
+    return 'all';
+  }
+  function visible(tag){
+    var f = filter.value;
+    if(f === 'all') return true;
+    var b = bucket(tag);
+    return f === b || (f === 'signal' && b === 'action');
+  }
+  function addEvent(tag, node, text){
+    if(tag === 'LIVE' && node === 'stream'){
+      if(!live){
+        live = document.createElement('div');
+        live.className = 'ev live';
+        var t = document.createElement('span'); t.className = 'tag LIVE'; t.textContent = 'LIVE';
+        liveTxt = document.createElement('div'); liveTxt.className = 'txt';
+        live.appendChild(t); live.appendChild(liveTxt);
+        log.appendChild(live);
+      }
+      liveTxt.textContent += text; liveTxt.scrollTop = liveTxt.scrollHeight;
+      follow(); trim(); return;
+    }
+    if(tag === 'LIVE' && node === 'stream-end'){
+      if(live){
+        var m = liveTxt.textContent.match(/"meta_thought"\s*:\s*"((?:[^"\\]|\\.){0,400})/);
+        if(m){ liveTxt.textContent = m[1].replace(/\\n/g,'\n').replace(/\\"/g,'"'); }
+        live = null; liveTxt = null;
+      }
+      return;
+    }
+    if(node === 'heartbeat'){
+      var now = Date.now();
+      if(now - lastBeat < 1200) { return; }
+      lastBeat = now;
+      var hb = log.querySelector('.hb.last');
+      if(!hb){ hb = document.createElement('div'); hb.className = 'hb last'; log.appendChild(hb); }
+      hb.textContent = text;
+      follow(); trim(); return;
+    }
+    var el = document.createElement('div');
+    el.className = 'ev';
+    el.dataset.bucket = bucket(tag);
+    var tg = document.createElement('span');
+    tg.className = 'tag ' + tag.replace(/[^A-Z]/g,'');
+    tg.textContent = tag.slice(0,6);
+    var tx = document.createElement('div');
+    tx.className = 'txt';
+    tx.textContent = text;
+    el.appendChild(tg); el.appendChild(tx);
+    el.style.display = visible(tag) ? '' : 'none';
+    log.appendChild(el); follow(); trim();
+  }
+
+  filter.addEventListener('change', function(){
+    Array.prototype.forEach.call(log.children, function(el){
+      if(el.classList.contains('ev') && el.dataset.bucket){
+        el.style.display = visible(el.querySelector('.tag').textContent.toUpperCase().slice(0,6)) ? '' : 'none';
+      }
+    });
+  });
+  document.getElementById('btnClear').addEventListener('click', function(){
+    log.innerHTML = ''; toast('console cleared (agent state kept)');
+  });
+
+  // ---------- SSE ----------
+  var es;
+  function connect(){
+    es = new EventSource('/stream');
+    es.onopen = function(){ conn.className = 'dot on'; };
+    es.onerror = function(){ conn.className = 'dot err'; };
+    es.onmessage = function(e){
+      try {
+        var d = JSON.parse(e.data);
+        addEvent(d.tag || 'META', d.node || '', d.text == null ? '' : String(d.text));
+        if(d.tag === 'END'){
+          stPill.textContent = 'finished'; stPill.className = 'pill done';
+          refresh();
+        }
+      } catch(err){}
+    };
+  }
+  connect();
+
+  // ---------- status polling ----------
+  var lastStatus = '';
+  function refresh(){
+    fetch('/status', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(s){
+      var m = s.mission || {};
+      var st = (m.status || 'idle');
+      stPill.textContent = st;
+      stPill.className = 'pill ' + (st === 'running' ? 'run'
+        : (st === 'COMPLETE' ? 'done' : (/STEP_LIMIT|EXHAUSTED|STOPPED/.test(st) ? 'stop' : '')));
+      modelPill.textContent = s.model || '—';
+      document.getElementById('sSteps').textContent = s.stats.steps;
+      document.getElementById('sReq').textContent = s.stats.requests;
+      var ver = document.getElementById('sVer');
+      ver.textContent = s.stats.evidence_verified;
+      ver.className = 'v ' + (s.stats.evidence_verified ? 'ok' : 'no');
+      document.getElementById('sSurf').textContent = s.stats.surfaces;
+      document.getElementById('mObj').textContent = m.objective || '—';
+      document.getElementById('mStat').textContent = st;
+      var c = s.contract || {};
+      document.getElementById('mContract').textContent =
+        (c.kind || '—') + (c.requires_exploit ? ' · exploit required' : ' · recon deliverable');
+      document.getElementById('mQueue').textContent = s.queue_depth;
+      document.getElementById('queueHint').textContent = s.queue_depth ? (s.queue_depth + ' queued') : '';
+      var gate = document.getElementById('gate');
+      if(s.gate_open){
+        gate.className = 'gate open';
+        gate.textContent = 'OPEN — the harness has replay-verified evidence; the mission may be reported complete.';
+      } else {
+        gate.className = 'gate closed';
+        var rs = (s.gate_reasons || []).slice(0,3);
+        gate.innerHTML = 'CLOSED — completion is not yet provable.' + (rs.length
+          ? '<ul>' + rs.map(function(x){
+              var li = document.createElement('li'); li.textContent = x; return li.outerHTML;
+            }).join('') + '</ul>' : '');
+      }
+      var res = s.results || [];
+      var box = document.getElementById('mResults');
+      if(res.length){
+        box.innerHTML = '';
+        res.slice().reverse().forEach(function(r){
+          var row = document.createElement('div'); row.className = 'row';
+          var k = document.createElement('span'); k.className = 'kk'; k.textContent = r.status || '?';
+          var v = document.createElement('span'); v.className = 'vv';
+          v.textContent = (r.objective || '').slice(0,90) + ' · ' + (r.steps || 0) + ' steps';
+          row.appendChild(k); row.appendChild(v); box.appendChild(row);
+        });
+      }
+      var chips = document.getElementById('capChips');
+      chips.innerHTML = '';
+      [['tools', s.tools], ['browser', s.browser ? (s.browser_backend || 'ready') : 'n/a']].forEach(function(p){
+        var d = document.createElement('span'); d.className = 'chip';
+        d.textContent = p[0] + ': ' + p[1]; chips.appendChild(d);
+      });
+      lastStatus = st;
+    }).catch(function(){});
+  }
+  refresh(); setInterval(refresh, 4000);
+
+  // ---------- tabs ----------
+  var tabs = document.querySelectorAll('nav button');
+  Array.prototype.forEach.call(tabs, function(b){
+    b.addEventListener('click', function(){
+      Array.prototype.forEach.call(tabs, function(x){ x.setAttribute('aria-selected', 'false'); });
+      b.setAttribute('aria-selected', 'true');
+      Array.prototype.forEach.call(document.querySelectorAll('.panel'), function(p){
+        p.classList.toggle('active', p.id === b.dataset.tab);
+      });
+      if(b.dataset.tab === 'files') loadFiles();
+      if(b.dataset.tab === 'status') refresh();
+      if(b.dataset.tab === 'memory') loadMemory();
+      if(b.dataset.tab === 'mail') loadMail('');
+      if(b.dataset.tab === 'phish') loadPhish();
+      if(b.dataset.tab === 'oracle') orcLoad();
+      if(b.dataset.tab === 'lab') labLoad();
+      if(b.dataset.tab === 'selfedit') seLoad();
+    });
+  });
+  // desktop: console stays pinned left, so show the files panel on the right
+  if(window.matchMedia && window.matchMedia('(min-width:980px)').matches){
+    Array.prototype.forEach.call(document.querySelectorAll('.panel'), function(p){
+      p.classList.toggle('active', p.id === 'files');
+    });
+    var fb = document.querySelector('nav button[data-tab="files"]');
+    if(fb){
+      Array.prototype.forEach.call(tabs, function(x){ x.setAttribute('aria-selected', 'false'); });
+      fb.setAttribute('aria-selected', 'true');
+    }
+  }
+
+  // ---------- composer ----------
+  var msg = document.getElementById('msg');
+  var btnSend = document.getElementById('btnSend');
+  function autogrow(){
+    msg.style.height = 'auto';
+    msg.style.height = Math.min(msg.scrollHeight, Math.round(window.innerHeight*0.38)) + 'px';
+  }
+  msg.addEventListener('input', autogrow);
+  function send(){
+    var v = msg.value.trim();
+    if(!v) return;
+    btnSend.disabled = true;
+    fetch('/chat', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'message=' + encodeURIComponent(v)})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        addEvent('PLAN','queue','DIRECTIVE: ' + v);
+        msg.value = ''; autogrow();
+        toast('queued (' + (d.queue_depth || 1) + ' pending)');
+        refresh();
+      })
+      .catch(function(){ toast('send failed — is the agent running?'); })
+      .finally(function(){ btnSend.disabled = false; });
+  }
+  btnSend.addEventListener('click', send);
+  msg.addEventListener('keydown', function(e){
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  });
+
+  // ---------- uploads ----------
+  function uploadFiles(list){
+    if(!list || !list.length) return;
+    var fd = new FormData();
+    for(var i=0;i<list.length;i++) fd.append('file', list[i]);
+    toast('uploading ' + list.length + ' file(s)…');
+    fetch('/upload', {method:'POST', body:fd})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var parts = [];
+        (d.saved||[]).forEach(function(f){ parts.push(f.name + ' (' + f.bytes + 'B)'); });
+        (d.skipped||[]).forEach(function(f){ parts.push(f.name + ': ' + f.error); });
+        toast(parts.join(', ') || 'nothing uploaded');
+        loadFiles();
+      })
+      .catch(function(){ toast('upload failed'); });
+  }
+  var fileInput = document.getElementById('fileInput');
+  document.getElementById('btnAttach').addEventListener('click', function(){ fileInput.click(); });
+  document.getElementById('btnPick').addEventListener('click', function(){ fileInput.click(); });
+  fileInput.addEventListener('change', function(){ uploadFiles(fileInput.files); fileInput.value=''; });
+
+  var drop = document.getElementById('drop');
+  ['dragenter','dragover'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('hot'); });
+  });
+  ['dragleave','drop'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('hot'); });
+  });
+  drop.addEventListener('drop', function(e){
+    if(e.dataTransfer && e.dataTransfer.files) uploadFiles(e.dataTransfer.files);
+  });
+  document.addEventListener('dragover', function(e){ e.preventDefault(); });
+  document.addEventListener('drop', function(e){
+    if(e.target && drop.contains(e.target)) return;
+    e.preventDefault();
+    if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+  });
+
+  function human(b){
+    if(b < 1024) return b + ' B';
+    if(b < 1048576) return (b/1024).toFixed(1) + ' KB';
+    return (b/1048576).toFixed(1) + ' MB';
+  }
+  function loadFiles(){
+    var box = document.getElementById('flist');
+    fetch('/files', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(d){
+      if(!d.files || !d.files.length){
+        box.innerHTML = '<div class="empty">workspace is empty — uploads and agent artifacts will appear here</div>';
+        return;
+      }
+      box.innerHTML = '';
+      d.files.slice(0,300).forEach(function(f){
+        var a = document.createElement('a');
+        a.className = 'fitem'; a.href = '/files/' + f.path.split('/').map(encodeURIComponent).join('/');
+        a.target = '_blank'; a.rel = 'noopener';
+        var ext = document.createElement('span'); ext.className='ext'; ext.textContent = (f.type || 'file').slice(0,4);
+        var meta = document.createElement('div'); meta.className='meta';
+        var nm = document.createElement('div'); nm.className='nm'; nm.textContent = f.name;
+        var sub = document.createElement('div'); sub.className='sub';
+        sub.textContent = human(f.bytes) + ' · ' + f.mtime + (f.path.indexOf('/') > -1 ? ' · ' + f.path : '');
+        meta.appendChild(nm); meta.appendChild(sub);
+        a.appendChild(ext); a.appendChild(meta); box.appendChild(a);
+      });
+    }).catch(function(){ box.innerHTML = '<div class="empty">could not read workspace</div>'; });
+  }
+  loadFiles();
+
+  // ---------- memory / mail / phish panels ----------
+  function el(tag, cls, text){
+    var n = document.createElement(tag);
+    if(cls) n.className = cls;
+    if(text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function itemRow(title, sub, cls, onClick){
+    var d = el('div', 'item' + (cls ? ' ' + cls : ''));
+    d.appendChild(el('div', 't', title));
+    d.appendChild(el('div', 's', sub || ''));
+    if(onClick) d.addEventListener('click', onClick);
+    return d;
+  }
+  function fill(box, rows, emptyText){
+    box.innerHTML = '';
+    if(!rows || !rows.length){
+      var e = el('div', 'empty', emptyText);
+      e.style.padding = '8px 0';
+      box.appendChild(e);
+      return;
+    }
+    rows.forEach(function(r){ box.appendChild(r); });
+  }
+  function jpost(url, body){
+    return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body || {})}).then(function(r){ return r.json(); });
+  }
+
+  function loadMemory(){
+    var block = document.getElementById('memBlock');
+    fetch('/memory', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(d){
+      if(!d.ok){ block.textContent = 'subsystem unavailable: ' + (d.error || 'unknown'); return; }
+      block.textContent = d.block || 'MISSION MEMORY: empty — nothing tried yet.';
+      document.getElementById('memSummary').textContent = d.summary || 'no checkpoint stored yet';
+      document.getElementById('memUpdated').textContent =
+        String(d.updated || '').replace('T', ' ').slice(0, 16);
+      document.getElementById('memAtt').textContent = (d.attempts || []).length;
+      document.getElementById('memConf').textContent = (d.confirmed || []).length;
+      document.getElementById('memDead').textContent = (d.dead_ends || []).length;
+      document.getElementById('memHyp').textContent = (d.hypotheses || []).filter(function(h){
+        return h.status === 'open'; }).length;
+      var fz = d.freeze || {};
+      var fr = document.getElementById('memFreeze');
+      fr.textContent = fz.on ? ('frozen at ' + String(fz.at || '')) : 'not frozen';
+      fr.className = 'tagline ' + (fz.on ? 'bad' : 'ok');
+      fill(document.getElementById('memUntried'), (d.untried || []).map(function(u){
+        return itemRow(u.vector, u.surface);
+      }), 'nothing untried — every known vector has been attempted');
+      fill(document.getElementById('memAttempts'),
+        (d.attempts || []).slice(-30).reverse().map(function(a){
+          return itemRow('#' + a.id + '  ' + a.vector + ' → ' + a.outcome,
+            String(a.surface || '') + (a.payload ? '  ·  ' + a.payload : ''));
+        }), 'no attempts recorded yet');
+      fill(document.getElementById('memJournal'),
+        (d.journal || []).slice().reverse().map(function(j){
+          return itemRow('step ' + j.step + ' · ' + String(j.at || '').replace('T', ' ').slice(0, 19),
+            j.action || '');
+        }), 'journal empty');
+    }).catch(function(){ block.textContent = 'could not read memory'; });
+  }
+
+  function resumeMission(){
+    jpost('/resume', {}).then(function(d){
+      if(!d.ok){ toast('resume refused: ' + (d.error || '?')); return; }
+      toast('continuing from checkpoint');
+      addEvent('PLAN', 'resume', 'RESUME — continuing: ' + (d.objective || '').slice(0, 120));
+      setTimeout(refresh, 600);
+    }).catch(function(){ toast('resume failed'); });
+  }
+
+  function loadMail(address){
+    var url = '/mail' + (address ? '?address=' + encodeURIComponent(address) : '');
+    fetch(url, {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(d){
+      if(!d.ok){ toast('mail unavailable: ' + (d.error || '?')); return; }
+      document.getElementById('mailActive').textContent =
+        d.active || 'no mailbox — create one';
+      fill(document.getElementById('mailBoxes'), (d.mailboxes || []).map(function(a){
+        return itemRow(a.address || a.id, a.provider || '', a.address === d.active ? 'sel' : '',
+          function(){ loadMail(a.address); });
+      }), 'no mailboxes yet');
+      fill(document.getElementById('mailMsgs'), (d.messages || []).map(function(m){
+        return itemRow(m.subject || '(no subject)',
+          (m.from || '?') + (m.date ? ' · ' + String(m.date) : '') +
+          (m.intro ? '\n' + m.intro : ''), '', function(){ openMail(m.id); });
+      }), 'inbox empty');
+    }).catch(function(){ toast('mail read failed'); });
+  }
+
+  function createMailbox(){
+    var label = document.getElementById('mailLabel').value.trim();
+    var prov = document.getElementById('mailProvider').value;
+    jpost('/mail/create', {label: label, provider: prov}).then(function(d){
+      if(!d.ok){ toast('create failed: ' + (d.error || '?')); return; }
+      var m = d.mailbox || {};
+      addEvent('DATA', 'temp_mail', 'temp mailbox ' + (m.address || '') + ' via ' + (m.provider || ''));
+      toast('mailbox ' + (m.address || ''));
+      loadMail('');
+    }).catch(function(){ toast('create failed — check connectivity'); });
+  }
+
+  function openMail(id){
+    var body = document.getElementById('mailBody');
+    if(!id){ body.textContent = 'this message has no id'; return; }
+    body.textContent = 'loading…';
+    fetch('/mail/read/' + encodeURIComponent(id), {cache:'no-store'})
+      .then(function(r){ return r.json(); }).then(function(d){
+        if(!d.ok){ body.textContent = 'read failed: ' + (d.error || '?'); return; }
+        var m = d.message || {};
+        var parts = ['From: ' + (m.from || '?'), 'Subject: ' + (m.subject || '')];
+        if(m.codes && m.codes.length) parts.push('codes: ' + m.codes.join(', '));
+        if(m.links && m.links.length) parts.push('links: ' + m.links.join('\n       '));
+        parts.push('', m.body || '(empty body)');
+        body.textContent = parts.join('\n');
+      }).catch(function(){ body.textContent = 'read failed'; });
+  }
+
+  var lastPage = '';
+  function loadPhish(){
+    fetch('/phish', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(d){
+      if(!d.ok){ toast('simulation subsystem unavailable'); return; }
+      var sel = document.getElementById('phishTemplate');
+      var tpls = d.templates || [];
+      if(sel.options.length !== tpls.length){
+        var want = sel.value;
+        sel.innerHTML = '';
+        tpls.forEach(function(t){
+          var o = document.createElement('option'); o.value = t; o.textContent = t;
+          sel.appendChild(o);
+        });
+        if(want) sel.value = want;
+      }
+      var c = d.campaign || {};
+      var tn = d.tunnel || {};
+      var st = document.getElementById('phishState');
+      st.textContent = (c.running
+        ? ('serving on :' + c.port + ' · ' + (c.captures || 0) + ' captures')
+        : 'stopped') + (tn.running && tn.url ? ' · public' : '');
+      st.className = 'tagline' + (c.running ? ' ok' : '');
+      renderTunnel(tn.running ? tn.url : '');
+      fill(document.getElementById('phishCaps'), (d.captures || []).map(function(x){
+        return itemRow(String(x.capture_id || '') + '  ' + (x.fields || []).join(', '),
+          (x.ip || '?') + ' · ' + String(x.at || '') +
+          (x.password_present ? ' · password field' : ''), x.password_present ? 'sel' : '');
+      }), 'no captures yet');
+      fill(document.getElementById('phishPages'), (d.pages || []).map(function(p){
+        return itemRow(p, 'saved page — start the server to serve it');
+      }), 'no pages built yet');
+    }).catch(function(){});
+  }
+
+  function buildPhish(){
+    var payload = {
+      template: document.getElementById('phishTemplate').value,
+      title: document.getElementById('phishTitle').value.trim(),
+      redirect: document.getElementById('phishRedirect').value.trim()
+    };
+    jpost('/phish/build', payload).then(function(d){
+      if(!d.ok){ toast('build failed: ' + (d.error || '?')); return; }
+      lastPage = d.path || '';
+      addEvent('DATA', 'phish', 'built simulation page ' + lastPage +
+        ' (' + d.bytes + ' bytes) — carries a simulation marker');
+      toast('page built: ' + String(lastPage).split('/').pop());
+      loadPhish();
+    }).catch(function(){ toast('build failed'); });
+  }
+
+  function renderTunnel(url){
+    var row = document.getElementById('phishTunRow');
+    var link = document.getElementById('phishTunUrl');
+    if(!row || !link) return;
+    if(!url){ row.hidden = true; link.textContent = ''; link.removeAttribute('href'); return; }
+    row.hidden = false;
+    link.textContent = url;
+    link.href = url;
+  }
+
+  function startPhish(useTunnel){
+    var ack = document.getElementById('phishAck').value.trim();
+    if(ack.length < 4){
+      toast('type the authorization note first');
+      document.getElementById('phishAck').focus();
+      return;
+    }
+    var btn = document.getElementById(useTunnel ? 'btnPhishTunnel' : 'btnPhishStart');
+    if(useTunnel){
+      btn.disabled = true;
+      toast('bringing up public tunnel…');
+    }
+    jpost('/phish/start', {
+      ack: ack,
+      port: parseInt(document.getElementById('phishPort').value, 10) || 8088,
+      page_path: lastPage,
+      title: document.getElementById('phishTitle').value.trim(),
+      redirect: document.getElementById('phishRedirect').value.trim(),
+      tunnel: !!useTunnel
+    }).then(function(d){
+      if(btn) btn.disabled = false;
+      if(!d.ok){ toast('start refused: ' + (d.error || '?')); return; }
+      var st = d.campaign || {};
+      var url = st.public_url || st.landing_url || ('port ' + st.port);
+      addEvent('DATA', 'phish', 'capture server listening on ' + url +
+        ' — fields stored locally, never executed');
+      if(st.public_url){
+        renderTunnel(st.public_url);
+        toast('public url: ' + st.public_url);
+      } else if(useTunnel && d.tunnel && !d.tunnel.ok){
+        toast('tunnel failed: ' + (d.tunnel.error || '?') + ' (still serving locally)');
+      } else {
+        toast('serving on port ' + st.port);
+      }
+      loadPhish();
+    }).catch(function(){ if(btn) btn.disabled = false; toast('start failed'); });
+  }
+
+  function tunnelPhish(action){
+    jpost('/phish/tunnel', {tunnel_action: action}).then(function(d){
+      var t = d.tunnel || {};
+      if(action === 'stop'){
+        toast('tunnel dropped'); renderTunnel('');
+      } else if(t.url){
+        renderTunnel(t.url);
+        toast('public url: ' + t.url);
+        addEvent('DATA', 'phish', 'public tunnel up: ' + t.url);
+      } else {
+        toast('tunnel failed: ' + (t.error || '?'));
+      }
+      loadPhish();
+    }).catch(function(){ toast('tunnel request failed'); });
+  }
+
+  function stopPhish(){
+    jpost('/phish/stop', {}).then(function(d){
+      toast(d.ok ? 'capture server stopped' : 'stop failed');
+      loadPhish();
+    }).catch(function(){ toast('stop failed'); });
+  }
+
+  document.getElementById('btnMemRefresh').addEventListener('click', loadMemory);
+  document.getElementById('btnResume').addEventListener('click', resumeMission);
+  document.getElementById('btnResume2').addEventListener('click', resumeMission);
+  document.getElementById('btnMailRefresh').addEventListener('click', function(){ loadMail(''); });
+  document.getElementById('btnMailCreate').addEventListener('click', createMailbox);
+  document.getElementById('btnPhishRefresh').addEventListener('click', loadPhish);
+  document.getElementById('btnPhishBuild').addEventListener('click', buildPhish);
+  document.getElementById('btnPhishStart').addEventListener('click', function(){ startPhish(false); });
+  document.getElementById('btnPhishTunnel').addEventListener('click', function(){ startPhish(true); });
+  document.getElementById('btnPhishStop2').addEventListener('click', stopPhish);
+  document.getElementById('btnPhishTunStop').addEventListener('click', function(){ tunnelPhish('stop'); });
+  document.getElementById('btnPhishTunCopy').addEventListener('click', function(){
+    var link = document.getElementById('phishTunUrl');
+    var url = link ? (link.textContent || '') : '';
+    if(!url){ toast('no tunnel url yet'); return; }
+    var done = function(){ toast('url copied'); };
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(done, function(){ toast(url); });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = url; document.body.appendChild(ta); ta.select();
+      try{ document.execCommand('copy'); done(); }catch(e){ toast(url); }
+      document.body.removeChild(ta);
+    }
+  });
+
+  // ---------- oracle persona ----------
+  function orcPaint(role, text){
+    var box = document.getElementById('orcLog');
+    if(!box) return null;
+    var d = el('div', 'orcmsg ' + role);
+    d.appendChild(el('span', 'who', role === 'me' ? 'you' : (role === 'ai' ? 'oracle' : 'system')));
+    d.appendChild(document.createTextNode(text === undefined || text === null ? '' : String(text)));
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+    return d;
+  }
+  function orcSetState(s, label){
+    var st = document.getElementById('orcStage');
+    if(st) st.setAttribute('data-state', s);
+    var tag = document.getElementById('orcState');
+    if(!tag) return;
+    tag.textContent = label || s;
+    tag.className = 'orcstate' + (s === 'idle' || s === 'speaking' ? ' live' : '');
+  }
+  function orcPending(list){
+    var s = document.getElementById('orcPending');
+    if(!s) return;
+    var p = list || [];
+    s.textContent = p.length ? (p.length + ' directive' + (p.length > 1 ? 's' : '') + ' queued') : '';
+    s.title = p.map(function(x){ return '- ' + String(x.text || ''); }).join('\n');
+  }
+  function orcPendingRefresh(){
+    fetch('/oracle/steer', {cache:'no-store'}).then(function(r){ return r.json(); })
+      .then(function(d){ if(d && d.ok) orcPending(d.pending || []); }).catch(function(){});
+  }
+  function orcRender(d){
+    var box = document.getElementById('orcLog');
+    if(!box) return;
+    var st = d.status || {};
+    var auto = document.getElementById('orcAuto');
+    if(auto) auto.checked = !!st.auto_steer;
+    box.innerHTML = '';
+    var h = d.history || [];
+    if(h.length){
+      h.forEach(function(m){
+        orcPaint(m.role === 'user' ? 'me' : 'ai', m.content || '');
+      });
+    } else {
+      orcPaint('sys', 'empty thread. this is the state it reads:');
+      if(d.state) orcPaint('sys', d.state);
+    }
+    orcPending(st.queued || []);
+    orcSetState(st.model_wired ? 'idle' : 'offline',
+                st.model_wired ? 'watching' : 'no model');
+  }
+  function orcLoad(){
+    fetch('/oracle', {cache:'no-store'}).then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d.ok){
+          orcSetState('offline', 'offline');
+          var box = document.getElementById('orcLog');
+          if(box && !box.children.length) orcPaint('sys', 'oracle unavailable: ' + (d.error || '?'));
+          return;
+        }
+        orcRender(d);
+      }).catch(function(){ orcSetState('offline', 'offline'); });
+  }
+  function orcSend(){
+    var ta = document.getElementById('orcMsg');
+    if(!ta) return;
+    var v = (ta.value || '').trim();
+    if(!v) return;
+    ta.value = '';
+    orcPaint('me', v);
+    orcSetState('thinking', 'thinking');
+    var auto = document.getElementById('orcAuto');
+    jpost('/oracle/chat', {message: v, steer: auto ? !!auto.checked : false}).then(function(d){
+      if(!d.ok){ orcPaint('sys', 'failed: ' + (d.error || '?')); orcSetState('idle', 'watching'); return; }
+      orcSetState('speaking', 'speaking');
+      orcPaint('ai', d.reply || '(empty reply)');
+      if(d.basis) orcPaint('sys', 'basis: ' + d.basis);
+      if(d.degraded) orcPaint('sys', 'model unreachable — answered from recorded state (' + d.degraded + ')');
+      if(d.steer) orcPaint('sys', (d.steered ? 'queued for the agent: ' : 'suggested (auto off): ') + d.steer);
+      setTimeout(function(){ orcSetState('idle', 'watching'); }, 1600);
+      orcPendingRefresh();
+    }).catch(function(){ orcPaint('sys', 'request failed'); orcSetState('idle', 'watching'); });
+  }
+  document.getElementById('btnOrcSend').addEventListener('click', orcSend);
+  document.getElementById('btnOrcReload').addEventListener('click', orcLoad);
+  document.getElementById('btnOrcReset').addEventListener('click', function(){
+    if(!confirm('Clear the oracle transcript? Queued directives stay.')) return;
+    jpost('/oracle/reset', {}).then(function(){ orcLoad(); toast('oracle thread cleared'); })
+      .catch(function(){ toast('reset failed'); });
+  });
+  document.getElementById('orcAuto').addEventListener('change', function(){
+    var on = this.checked;
+    jpost('/oracle/auto', {on: on}).then(function(d){
+      if(!d.ok){ toast('oracle unavailable'); return; }
+      toast('oracle steering ' + (d.auto_steer ? 'on — it can write directives' : 'off'));
+    }).catch(function(){});
+  });
+  document.getElementById('orcMsg').addEventListener('keydown', function(e){
+    if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); orcSend(); }
+  });
+
+  (function orbDrag(){
+    var orb = document.getElementById('orcOrb');
+    var stage = document.getElementById('orcStage');
+    if(!orb || !stage) return;
+    var ry = 0, rx = 8, dragging = false, lx = 0, ly = 0;
+    function apply(){
+      orb.style.setProperty('--ry', ry + 'deg');
+      orb.style.setProperty('--rx', rx + 'deg');
+    }
+    stage.addEventListener('pointerdown', function(e){
+      dragging = true; lx = e.clientX; ly = e.clientY;
+      orb.style.transition = 'none';
+      try{ stage.setPointerCapture(e.pointerId); }catch(err){}
+    });
+    stage.addEventListener('pointermove', function(e){
+      if(!dragging) return;
+      ry += (e.clientX - lx) * 0.7;
+      rx -= (e.clientY - ly) * 0.5;
+      rx = Math.max(-46, Math.min(46, rx));
+      lx = e.clientX; ly = e.clientY;
+      apply();
+    });
+    function stop(){ dragging = false; orb.style.transition = 'transform .18s linear'; }
+    stage.addEventListener('pointerup', stop);
+    stage.addEventListener('pointercancel', stop);
+    stage.addEventListener('pointerleave', stop);
+    setInterval(function(){ if(!dragging){ ry += 0.45; apply(); } }, 70);
+    apply();
+  })();
+
+  // ---------- lab ----------
+  var labEntries = [];
+  function labOut(text){
+    var b = document.getElementById('labOut');
+    if(b) b.textContent = text || '';
+  }
+  function labNameVal(){
+    var f = document.getElementById('labName');
+    var v = f ? (f.value || '').trim() : '';
+    if(!v) toast('name the lab entry first');
+    return v;
+  }
+  function labRender(entries){
+    labEntries = entries || [];
+    var box = document.getElementById('labList');
+    if(!box) return;
+    box.innerHTML = '';
+    if(!labEntries.length){
+      box.appendChild(el('div', 'empty', 'nothing in the lab yet'));
+      return;
+    }
+    labEntries.forEach(function(e){
+      var row = el('div', 'labitem');
+      row.appendChild(el('span', 'nm', e.name));
+      row.appendChild(el('span', 'bd' + (e.built ? ' ok' : ''),
+        e.built ? (Math.max(1, Math.round((e.artifact_bytes || 0) / 1024)) + 'K') : 'src'));
+      row.title = (e.files || []).map(function(f){ return f.name + '  ' + f.bytes + 'B  ' + f.mtime; }).join('\n');
+      row.addEventListener('click', function(){ labPick(e.name); });
+      box.appendChild(row);
+    });
+  }
+  function labLoad(){
+    fetch('/lab', {cache:'no-store'}).then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d.ok){ labOut('lab unavailable: ' + (d.error || '?')); return; }
+        var doc = d.doctor || {};
+        var tl = (d.templates && d.templates.templates) || [];
+        var sel = document.getElementById('labTpl');
+        if(sel && sel.options.length <= 1){
+          var o0 = document.createElement('option');
+          o0.value = ''; o0.textContent = '— pick a template —';
+          sel.appendChild(o0);
+          tl.forEach(function(x){
+            var o = document.createElement('option');
+            o.value = x.name;
+            o.textContent = x.name + '  (' + x.lang + ')';
+            o.title = x.why || '';
+            sel.appendChild(o);
+          });
+        }
+        var canB = doc.can_build || [];
+        document.getElementById('labDoc').textContent =
+          'arch ' + (doc.arch || '?') + ' · cc ' + (doc.cc || 'none') +
+          ' · builds: ' + (canB.join(', ') || 'nothing') +
+          ' · ' + (doc.free_mb || 0) + ' MB free';
+        var tools = doc.tools || {};
+        var have = [], miss = [];
+        Object.keys(tools).forEach(function(k){ (tools[k] ? have : miss).push(k); });
+        var tt = document.getElementById('labTools');
+        if(tt) tt.textContent = 'have: ' + (have.join(' ') || '—') + '\nmissing: ' + (miss.join(' ') || '—');
+        labRender((d.entries && d.entries.entries) || []);
+      }).catch(function(){ labOut('lab request failed'); });
+  }
+  function labPick(name){
+    var f = document.getElementById('labName');
+    if(f) f.value = name;
+    var e = null;
+    labEntries.forEach(function(x){ if(x.name === name) e = x; });
+    jpost('/lab/read', {name: name}).then(function(d){
+      var ta = document.getElementById('labSrc');
+      if(d.ok && ta) ta.value = d.text || '';
+      var files = e ? (e.files || []).map(function(f2){ return f2.name + '  ' + f2.bytes + 'B'; }) : [];
+      labOut(name + '\n' + (files.join('\n') || 'no files') +
+        (d.ok ? '' : '\nsource: ' + (d.error || '?')));
+    }).catch(function(){});
+  }
+  function labWrite(){
+    var name = labNameVal();
+    if(!name) return;
+    var ta = document.getElementById('labSrc');
+    var src = ta ? (ta.value || '') : '';
+    var sel = document.getElementById('labTpl');
+    var tpl = sel ? sel.value : '';
+    var body = {name: name};
+    if(src.trim()) body.source = src;
+    else if(tpl) body.template = tpl;
+    else { toast('pick a template or paste source'); return; }
+    labOut('writing…');
+    jpost('/lab/write', body).then(function(d){
+      if(!d.ok){ labOut('write failed: ' + (d.error || '?')); return null; }
+      labOut('wrote ' + d.source_path + '  (' + d.bytes + ' bytes, ' + d.lang + ')');
+      if(src.trim()) return null;
+      return jpost('/lab/read', {name: name}).then(function(r){
+        if(r.ok && ta) ta.value = r.text || '';
+        return null;
+      });
+    }).then(function(){ labLoad(); }).catch(function(){ labOut('write request failed'); });
+  }
+  function labBuild(){
+    var name = labNameVal();
+    if(!name) return;
+    labOut('compiling ' + name + '…');
+    jpost('/lab/build', {name: name}).then(function(d){
+      if(!d.ok){
+        labOut('build failed: ' + (d.error || '?') +
+          (d.cmd ? '\n$ ' + d.cmd : '') + (d.stderr ? '\n' + d.stderr : ''));
+        return;
+      }
+      labOut('built ' + d.artifact + '\n' + d.bytes + ' bytes in ' + d.ms + ' ms' +
+        '\nsha256 ' + d.sha256 + '\n$ ' + d.cmd + (d.warnings ? '\n\n' + d.warnings : ''));
+      toast(name + ' built (' + d.bytes + ' B)');
+      labLoad();
+    }).catch(function(){ labOut('build request failed'); });
+  }
+  function labRun(){
+    var name = labNameVal();
+    if(!name) return;
+    var af = document.getElementById('labArgs');
+    var args = af ? (af.value || '').trim() : '';
+    labOut('running ' + name + (args ? ' ' + args : '') + '…');
+    jpost('/lab/run', {name: name, args: args, timeout: 10}).then(function(d){
+      if(!d.ok){ labOut('run failed: ' + (d.error || '?')); return; }
+      var parts = ['rc ' + d.rc + '  ' + d.ms + ' ms' + (d.timed_out ? '  (killed at timeout)' : '')];
+      if(d.note) parts.push(d.note);
+      if(d.stdout) parts.push('-- stdout --\n' + d.stdout);
+      if(d.stderr) parts.push('-- stderr --\n' + d.stderr);
+      labOut(parts.join('\n'));
+    }).catch(function(){ labOut('run request failed'); });
+  }
+  function labInspect(){
+    var name = labNameVal();
+    if(!name) return;
+    labOut('inspecting…');
+    jpost('/lab/inspect', {name: name}).then(function(d){
+      if(!d.ok){ labOut('inspect failed: ' + (d.error || '?')); return; }
+      var parts = [d.path, d.bytes + ' bytes', 'sha256 ' + d.sha256];
+      ['file', 'readelf', 'objdump', 'strings'].forEach(function(k){
+        if(d[k]) parts.push('-- ' + k + ' --\n' + String(d[k]).slice(0, 1400));
+      });
+      labOut(parts.join('\n'));
+    }).catch(function(){ labOut('inspect request failed'); });
+  }
+  function labDel(){
+    var name = labNameVal();
+    if(!name) return;
+    if(!confirm('Delete the lab entry "' + name + '" and everything in it?')) return;
+    jpost('/lab/delete', {name: name}).then(function(d){
+      labOut(d.ok ? ('deleted ' + name) : ('delete failed: ' + (d.error || '?')));
+      if(d.ok){
+        document.getElementById('labSrc').value = '';
+        document.getElementById('labName').value = '';
+        labLoad();
+      }
+    }).catch(function(){ labOut('delete request failed'); });
+  }
+  document.getElementById('btnLabWrite').addEventListener('click', labWrite);
+  document.getElementById('btnLabBuild').addEventListener('click', labBuild);
+  document.getElementById('btnLabRun').addEventListener('click', labRun);
+  document.getElementById('btnLabInspect').addEventListener('click', labInspect);
+  document.getElementById('btnLabDel').addEventListener('click', labDel);
+  document.getElementById('labTpl').addEventListener('change', function(){
+    var out = document.getElementById('labOut');
+    if(!this.value){ if(out) out.textContent = ''; return; }
+    var why = this.options[this.selectedIndex].title || '';
+    if(out) out.textContent = this.value + ': ' + why + '\nname it, then hit write to load the source here';
+  });
+
+  // ---------- self-edit ----------
+  var seTimer = null, seTries = 0;
+  function seEsc(t){
+    return String(t === null || t === undefined ? '' : t)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function seOut(t){
+    var b = document.getElementById('seOut');
+    if(b) b.textContent = t || '';
+  }
+  function sePaint(d){
+    if(!d || !d.ok){ seOut('self-edit unavailable: ' + ((d && d.error) || '?')); return; }
+    var ph = document.getElementById('sePhase');
+    if(ph){
+      var cls = 'tagline';
+      if(d.phase === 'done') cls += ' ok';
+      else if(d.phase === 'failed' || d.phase === 'rolled_back') cls += ' bad';
+      ph.className = cls;
+      ph.textContent = d.phase +
+        ' · iteration ' + (d.iteration || 0) + '/' + (d.max_iters || 3) +
+        ' · ' + (d.running ? 'loop running' : 'loop idle') +
+        (d.error ? ' · ' + d.error : '');
+    }
+    var run = document.getElementById('seRun');
+    if(run){
+      run.textContent = d.run_id
+        ? 'run ' + d.run_id + '\nstarted ' + String(d.started || '').replace('T', ' ') +
+          '\nupdated ' + String(d.updated || '').replace('T', ' ') +
+          '\nbackup ' + (d.backup_dir || '—')
+        : 'no run yet';
+    }
+    var sm = document.getElementById('seSummary');
+    if(sm) sm.textContent = d.summary || '—';
+
+    var v = d.validation || {};
+    fill(document.getElementById('seChecks'), ((v.checks || []).map(function(c){
+      return itemRow((c.ok ? 'PASS  ' : 'FAIL  ') + c.check, '', c.ok ? '' : 'sel');
+    })), 'no validation recorded yet');
+
+    fill(document.getElementById('seFiles'), (d.files_changed || []).map(function(f){
+      return itemRow(f, '');
+    }), 'no files changed');
+
+    fill(document.getElementById('seHist'), (d.history || []).map(function(h){
+      var errs = (h.errors || []).join('\n');
+      return itemRow('iteration ' + h.iteration +
+        (h.ok ? ' — accepted' : ' — rejected'),
+        (h.summary ? h.summary + '\n' : '') + errs, h.ok ? '' : 'sel');
+    }), 'no iterations yet');
+
+    fill(document.getElementById('seOps'), (d.ops || []).map(function(o){
+      return itemRow(o.file + (o.why ? ' — ' + o.why : ''),
+        o.find ? ('find: ' + o.find) : '');
+    }), 'no operations yet');
+
+    var pick = document.getElementById('seRunPick');
+    if(pick){
+      var want = pick.value;
+      var rows = d.runs || [];
+      var html = '<option value="">current run' +
+        (d.run_id ? ' (' + d.run_id + ')' : '') + '</option>';
+      rows.forEach(function(r){
+        html += '<option value="' + seEsc(r.run) + '">' +
+          seEsc(r.run + '  ' + (r.phase || '') + '  ' +
+                String(r.when || '').slice(5)) + '</option>';
+      });
+      pick.innerHTML = html;
+      pick.value = want && rows.some(function(r){ return r.run === want; }) ? want : '';
+    }
+    fill(document.getElementById('seRuns'), (d.runs || []).map(function(r){
+      return itemRow(r.run + '  — ' + (r.phase || '?'),
+        String(r.when || '') + '\nbacked up: ' + (r.files || []).join(', '),
+        r.phase === 'rolled_back' ? 'sel' : '', function(){
+          var p = document.getElementById('seRunPick');
+          if(p) p.value = r.run;
+          seLoadDiff(r.run);
+        });
+    }), 'no stored runs yet');
+
+    var df = document.getElementById('seDiff');
+    if(df) df.textContent = d.diff || 'no diff — nothing has been accepted yet';
+    var log = (d.log || []).slice(-40);
+    seOut(log.join('\n') || 'no activity yet');
+  }
+  function seLoad(){
+    clearTimeout(seTimer);
+    fetch('/selfedit', {cache:'no-store'}).then(function(r){ return r.json(); })
+      .then(function(d){
+        seTries = 0;
+        sePaint(d);
+        var live = ['planning', 'applying', 'validating', 'restarting'];
+        if(d.running || live.indexOf(d.phase) >= 0){
+          seTimer = setTimeout(seLoad, 1800);
+        }
+      }).catch(function(){
+        var ph = document.getElementById('sePhase');
+        if(ph){
+          ph.className = 'tagline bad';
+          ph.textContent = 'harness not answering — it is restarting; this panel '
+            + 'reconnects on its own';
+        }
+        if(seTries++ < 60) seTimer = setTimeout(seLoad, 2500);
+        else seOut('gave up waiting — reload the page once the harness is back');
+      });
+  }
+  function seStart(){
+    var ta = document.getElementById('sePrompt');
+    var prompt = ta ? (ta.value || '').trim() : '';
+    if(!prompt){ seOut('describe the change first'); return; }
+    var it = document.getElementById('seIters');
+    var rs = document.getElementById('seRestart');
+    var body = {prompt: prompt,
+                max_iters: parseInt((it && it.value) || '3', 10) || 3,
+                restart: !!(rs && rs.checked)};
+    seOut('starting: backing up every editable file, then asking the model for a patch…');
+    jpost('/selfedit/start', body).then(function(d){
+      if(!d.ok){ seOut('start refused: ' + (d.error || '?')); return; }
+      seOut('run ' + d.run_id + ' started');
+      seLoad();
+    }).catch(function(){
+      seOut('start request failed — if the server is restarting, reload in a moment');
+      seLoad();
+    });
+  }
+  function seStop(){
+    jpost('/selfedit/stop', {}).then(function(d){
+      seOut(d.stopping ? 'stop requested — the loop stops after this step'
+                       : 'nothing is running (' + (d.phase || '?') + ')');
+      seLoad();
+    }).catch(function(){ seOut('stop request failed'); });
+  }
+  function seLoadDiff(rid){
+    if(!rid) return;
+    fetch('/selfedit/diff?run=' + encodeURIComponent(rid), {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var box = document.getElementById('seDiff');
+        if(box) box.textContent = d.ok ? d.diff : ('no diff stored for run ' + rid);
+      }).catch(function(){ seOut('could not read that run\'s diff'); });
+  }
+  function seRollback(){
+    var pick = document.getElementById('seRunPick');
+    var rid = pick ? pick.value : '';
+    var msg = rid
+      ? 'Restore every editable file to how run ' + rid + ' found it?'
+      : 'Restore the backup taken when the current run started?';
+    if(!confirm(msg)) return;
+    jpost('/selfedit/rollback', rid ? {run: rid} : {}).then(function(d){
+      if(!d.ok){ seOut('rollback failed: ' + (d.error || '?')); return; }
+      seOut('restored:\n' + (d.restored || []).map(function(r){
+        return r.file + '  ' + (r.ok ? 'ok' : 'FAILED ' + (r.error || ''));
+      }).join('\n') +
+        (d.needs_restart ? '\nrestart the harness to unload the running code' : ''));
+      seLoad();
+    }).catch(function(){ seOut('rollback request failed'); });
+  }
+  document.getElementById('btnSeStart').addEventListener('click', seStart);
+  document.getElementById('btnSeRefresh').addEventListener('click', seLoad);
+  document.getElementById('btnSeStop').addEventListener('click', seStop);
+  document.getElementById('btnSeRollback').addEventListener('click', seRollback);
+
+  // ---------- controls ----------
+  document.getElementById('btnStop').addEventListener('click', function(){
+    fetch('/stop', {method:'POST'}).then(function(){ toast('stop requested'); });
+  });
+  document.getElementById('btnReset').addEventListener('click', function(){
+    if(!confirm('Reset mission state and clear the agent conversation?')) return;
+    fetch('/reset', {method:'POST'}).then(function(){ location.reload(); });
+  });
+
+  window.addEventListener('resize', autogrow);
+  autogrow();
+})();
+</script>
+</body>
+</html>
