@@ -133,7 +133,11 @@ def _save(st):
     st["updated"] = _now()
     tmp = _state_path() + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(st, f, indent=1)
+        # Keys prefixed with "_" are per-run ephemera (fetched source excerpts).
+        # They belong in memory only: persisting them would bloat state.json and
+        # they are meaningless to a later process.
+        json.dump({k: v for k, v in st.items() if not str(k).startswith("_")},
+                  f, indent=1)
     os.replace(tmp, _state_path())
 
 
@@ -316,8 +320,263 @@ def _norm_rel(name):
     return rel.lstrip("/")
 
 
+def _line_spans(text):
+    """[(line, start, end), ...] with character offsets into text."""
+    out = []
+    pos = 0
+    for line in text.splitlines(True):
+        out.append((line, pos, pos + len(line)))
+        pos += len(line)
+    if pos < len(text):
+        out.append((text[pos:], pos, len(text)))
+    return out
+
+
+def _indent_width(line):
+    """Leading-whitespace width, or None when tabs are involved."""
+    body = line.lstrip(" \t")
+    if not body:
+        return 0
+    pad = line[:len(line) - len(body)]
+    return None if "\t" in pad else len(pad)
+
+
+def _locate(text, find):
+    """Find the single span `find` refers to, tolerating indentation drift.
+
+    Models reproduce code from memory with the right tokens and the wrong
+    leading whitespace often enough that byte-exact matching alone rejects
+    correct patches. So: exact match first, then a line-by-line match that
+    ignores leading/trailing whitespace. Zero or 2+ matches is reported, never
+    guessed.
+
+    Returns {mode, start, end, hits, indent_delta}.
+    """
+    none = {"mode": None, "start": None, "end": None, "hits": 0,
+            "indent_delta": 0}
+    n = text.count(find)
+    if n == 1:
+        i = text.index(find)
+        return {"mode": "exact", "start": i, "end": i + len(find),
+                "hits": 1, "indent_delta": 0}
+    if n > 1:
+        none["hits"] = n
+        return none
+
+    want = [l.strip() for l in find.splitlines()]
+    while want and not want[0]:
+        want.pop(0)
+    while want and not want[-1]:
+        want.pop()
+    if not want:
+        return none
+
+    spans = _line_spans(text)
+    if len(want) > len(spans):
+        return none
+    flat = [s[0].strip() for s in spans]
+    hits = [i for i in range(len(spans) - len(want) + 1)
+            if flat[i:i + len(want)] == want]
+    if len(hits) != 1:
+        none["hits"] = len(hits)
+        return none
+
+    i = hits[0]
+    first = find.splitlines()[0] if find.splitlines() else ""
+    a, b = _indent_width(first), _indent_width(spans[i][0])
+    return {"mode": "loose", "start": spans[i][1],
+            "end": spans[i + len(want) - 1][2], "hits": 1,
+            "indent_delta": (b - a) if (a is not None and b is not None) else 0}
+
+
+def _shift(text, delta):
+    """Re-indent a replacement block so it lands at the depth it matched."""
+    if not delta:
+        return text
+    out = []
+    for line in text.splitlines(True):
+        if not line.strip():
+            out.append(line)
+        elif delta > 0:
+            out.append(" " * delta + line)
+        else:
+            drop = min(-delta, len(line) - len(line.lstrip(" ")))
+            out.append(line[drop:])
+    return "".join(out)
+
+
+def _nearest(text, find, context=3, limit=420):
+    """Closest actual text to an absent `find`, for the retry prompt.
+
+    Turns "not present, try again" into "here is what is actually there", so
+    the next iteration copies real bytes instead of guessing again.
+    """
+    anchors = [l.strip() for l in find.splitlines() if len(l.strip()) >= 6]
+    if not anchors:
+        return "(no usable anchor line to compare against)"
+    spans = _line_spans(text)
+    flat = [s[0].strip() for s in spans]
+    best = None
+    for anchor in sorted(anchors, key=len, reverse=True)[:3]:
+        for cand in difflib.get_close_matches(anchor, flat, n=1, cutoff=0.55):
+            score = difflib.SequenceMatcher(None, anchor, cand).ratio()
+            if best is None or score > best[0]:
+                best = (score, flat.index(cand))
+        if best and best[0] > 0.92:
+            break
+    if not best:
+        return ("No line in 'find' resembles this file — the code may not exist "
+                "yet. Request the exact bytes first: "
+                "{\"read\": [\"<file>:<start>-<end>\"]}")
+    score, idx = best
+    lo, hi = max(0, idx - context), min(len(spans), idx + context + 1)
+    body = "".join("%s| %s" % (str(n + 1).rjust(5), spans[n][0].rstrip())
+                   for n in range(lo, hi))
+    return ("Closest actual text (line %d, %.0f%% similar) — the 'NNNNN| ' prefix "
+            "is a line number, NOT file content:\n%s"
+            % (idx + 1, score * 100, body[:limit]))
+
+
+# Bounds for {"read": [...]} requests from the model.
+READ_MAX_RANGES = 6
+READ_MAX_LINES = 240
+READ_TOTAL_LINES = 900
+# How many read round-trips one iteration may spend, and how many fetched
+# excerpts stay in the prompt.
+MAX_READS = int(os.environ.get("SELFEDIT_MAX_READS", "4"))
+READ_KEEP = 3
+
+
+def read_ranges(specs):
+    """Resolve ["file:120-180", ...] into verbatim, line-numbered text.
+
+    This is the missing half of the patch protocol: a model cannot copy bytes
+    it was never shown, so it may ask for the exact region it means to edit
+    instead of inventing a 'find' string from memory.
+    """
+    if isinstance(specs, str):
+        specs = [specs]
+    if not isinstance(specs, list):
+        return "", ["'read' must be a list of \"file:start-end\" strings"]
+    scope = _scope_files()
+    chunks, notes = [], []
+    used = 0
+    for spec in specs[:READ_MAX_RANGES]:
+        raw = str(spec or "").strip()
+        if not raw:
+            continue
+        rel, _, rng = raw.partition(":")
+        rel = _norm_rel(rel)
+        if rel not in scope:
+            notes.append("%s is not an editable file" % (rel or raw))
+            continue
+        try:
+            text = _read(rel)
+        except Exception as e:
+            notes.append("cannot read %s: %s" % (rel, e))
+            continue
+        lines = text.splitlines()
+        start, end = 1, min(len(lines), 60)
+        rng = rng.strip()
+        if rng:
+            a, _, b = rng.partition("-")
+            try:
+                start = max(1, int(a))
+            except ValueError:
+                notes.append("%s: bad start in %r" % (rel, rng))
+                continue
+            try:
+                end = int(b) if b.strip() else start + 59
+            except ValueError:
+                notes.append("%s: bad end in %r" % (rel, rng))
+                continue
+        if start > len(lines):
+            notes.append("%s has only %d lines" % (rel, len(lines)))
+            continue
+        if used >= READ_TOTAL_LINES:
+            notes.append("read budget exhausted (%d lines)" % READ_TOTAL_LINES)
+            break
+        end = min(end, start + READ_MAX_LINES - 1, len(lines),
+                  start + (READ_TOTAL_LINES - used) - 1)
+        used += end - start + 1
+        body = "\n".join("%s| %s" % (str(n).rjust(5), lines[n - 1])
+                         for n in range(start, end + 1))
+        chunks.append("=== %s lines %d-%d of %d (verbatim) ===\n%s"
+                      % (rel, start, end, len(lines), body))
+    if not chunks:
+        return "", notes or ["no readable range requested"]
+    header = ("REQUESTED EXCERPTS — exact bytes from disk. Copy 'find' from "
+              "here character for character. The 'NNNNN| ' prefix is a line "
+              "number and is NOT part of the file.")
+    return header + "\n\n" + "\n\n".join(chunks), notes
+
+
 def apply_ops(ops):
     """Stage ops in memory. Nothing is written until _commit()."""
+    scope = _scope_files()
+    staged = {}
+    errs = []
+    notes = []
+    if not isinstance(ops, list) or not ops:
+        return {"ok": False, "errors": ["no ops supplied"], "staged": {}, "files": []}
+    total = 0
+    for i, op in enumerate(ops, 1):
+        if not isinstance(op, dict):
+            errs.append("op %d: not an object" % i)
+            continue
+        rel = _norm_rel(op.get("file"))
+        if rel not in scope:
+            errs.append("op %d: '%s' is not an editable file (allowed: %s)"
+                        % (i, rel or "?", ", ".join(sorted(scope))))
+            continue
+        find = op.get("find")
+        rep = op.get("replace")
+        if not isinstance(find, str) or not isinstance(rep, str):
+            errs.append("op %d: 'find' and 'replace' must be strings" % i)
+            continue
+        if len(find) < FIND_MIN:
+            errs.append("op %d: 'find' is %d chars — needs >=%d to be unique"
+                        % (i, len(find), FIND_MIN))
+            continue
+        if find == rep:
+            errs.append("op %d: 'find' equals 'replace' (no-op)" % i)
+            continue
+        text = staged.get(rel)
+        if text is None:
+            try:
+                text = _read(rel)
+            except Exception as e:
+                errs.append("op %d: cannot read %s: %s" % (i, rel, e))
+                continue
+        hit = _locate(text, find)
+        if hit["start"] is None:
+            if hit["hits"] > 1:
+                errs.append("op %d (%s): 'find' matches %d places even after "
+                            "ignoring indentation — include more surrounding "
+                            "lines" % (i, rel, hit["hits"]))
+            else:
+                errs.append("op %d (%s): 'find' is not in the file. %s"
+                            % (i, rel, _nearest(text, find)))
+            continue
+        new = rep if hit["mode"] == "exact" else _shift(rep, hit["indent_delta"])
+        staged[rel] = text[:hit["start"]] + new + text[hit["end"]:]
+        if hit["mode"] == "loose":
+            notes.append("op %d (%s): matched ignoring indentation%s"
+                         % (i, rel, (" and re-indented by %+d" % hit["indent_delta"])
+                            if hit["indent_delta"] else ""))
+        total += len(rep)
+    if total > MAX_PATCH:
+        errs.append("patch too large: %d chars > %d" % (total, MAX_PATCH))
+    if errs:
+        return {"ok": False, "errors": errs, "staged": {}, "files": [],
+                "notes": notes}
+    return {"ok": True, "errors": [], "staged": staged,
+            "files": sorted(staged), "notes": notes}
+
+
+def _commit(staged):
+    for rel, text in staged.items():
+      ing is written until _commit()."""
     scope = _scope_files()
     staged = {}
     errs = []
