@@ -424,6 +424,191 @@ def unit_checks():
     check("U5 recon objective does not require an exploit",
           c["kind"] == "recon" and not c["requires_exploit"], str(c["kind"]))
     c = A.mission_contract(f"find a working exploit on {BASE}")
+    check("U6n?tab=users, which "
+        f"returned `api tokens: {SECRET}` and `card_last4: 4242` — customer "
+        "payment metadata and a live API token were readable without "
+        "credentials.\n"
+        "Both requests were replayed by the harness and the same responses "
+        "reproduced, so the access is repeatable. Impact: authentication "
+        "bypass leading to disclosure of live API tokens and card data "
+        "across the admin console.")
+    replies = [
+        call("http_request", {"url": BASE + "/"}),
+        call("http_request", {"url": BASE + "/product?id=1'"}),
+        call("http_request", {"url": BASE + "/login", "method": "POST",
+                              "body": "username=admin'-- -&password=x",
+                              "headers": {"Content-Type":
+                                          "application/x-www-form-urlencoded"}}),
+        call("http_request", {"url": BASE + "/admin?tab=users"}),
+        call("complete", {"summary": summary}),
+    ]
+    hook, _, status, hist = run(obj, replies)
+    nudges = nudge_text(hist)
+    ver = [e for e in A.EVIDENCE if e["verified"]]
+    check("S3 status COMPLETE", status == "COMPLETE", f"status={status}")
+    check("S3 replay verified >=1 strong signal", len(ver) >= 1,
+          f"{[(e['kind'], e['verified_by']) for e in ver]}")
+    check("S3 admin data observed", any("privileged console" in e["kind"]
+                                        or "credential" in e["kind"] for e in A.EVIDENCE),
+          str([e["kind"] for e in A.EVIDENCE]))
+    check("S3 was not rejected at the end", "COMPLETE REJECTED" not in nudges[-1500:]
+          or status == "COMPLETE")
+    return hook
+
+
+def s4_no_hijack(hook):
+    print("\nS4 — no fabricated turns, no harness-fired requests")
+    hist = A.chat_session
+    turns = assistant_turns(hist)
+    emitted = set(hook.emitted)
+    check("S4 every assistant turn came from the model",
+          all(t in emitted for t in turns), f"{len(turns)} turns")
+    logged = {(r.get("url") or "").rstrip("/") for r in A.REQUEST_LOG}
+    asked = {u.rstrip("/") for u in hook.asked}
+    extra = {u for u in logged if u and u not in asked}
+    check("S4 harness issued no requests of its own", not extra, f"extra={sorted(extra)[:5]}")
+    check("S4 no ladder text injected",
+          "ATTACK LADDER" not in nudge_text(hist).upper())
+
+
+def s5_stall_bounded():
+    print("\nS5 — unproductive loop closes honestly")
+    obj = f"Exploit {BASE} and take it over."
+    replies = [call("http_request", {"url": f"{BASE}/missing{i}"}) for i in range(60)]
+    _, _, status, hist = run(obj, replies)
+    steps = A.mission.get("steps_used") or 0
+    nudges = nudge_text(hist)
+    check("S5 closed without COMPLETE", status in ("EXHAUSTED", "BLOCKED"), f"status={status}")
+    check("S5 bounded", steps <= 30, f"steps={steps}")
+    check("S5 escalated technique classes", "technique class" in nudges.lower()
+          or "STALL BREAKER" in nudges)
+    reports = sorted(glob.glob(os.path.join(WS, "*.md")), key=os.path.getmtime)
+    txt = open(reports[-1], encoding="utf-8", errors="replace").read() if reports else ""
+    check("S5 honest report artifact", "MISSION NOT COMPLETED" in txt,
+          (reports[-1] if reports else "no report written"))
+
+
+def s6_grounding():
+    print("\nS6 — fabricated quotes are caught")
+    obj = f"Exploit {BASE} and report it."
+    fake = ("Exploitation succeeded. The database responded with "
+            "`information_schema.tables` listing `users_email_password` and "
+            "`admin_api_keys`, and the response status 200 response proved "
+            "that the full schema was dumped to the attacker.")
+    _, _, status, hist = run(obj, [call("http_request", {"url": BASE + "/"})]
+                             + [call("complete", {"summary": fake})])
+    nudges = nudge_text(hist)
+    check("S6 rejected", "COMPLETE REJECTED" in nudges and status != "COMPLETE",
+          f"status={status}")
+    check("S6 grounding failure reported", "GROUNDING FAILED" in nudges
+          or "NO WORKING EXPLOIT" in nudges)
+
+
+def s7_surrender():
+    print("\nS7 — surrender phrasing is refused")
+    obj = f"Exploit {BASE} fully."
+    surrender = ("The application seems partially hardened. Manual inspection "
+                 "of the remaining endpoints is needed, and next steps would "
+                 "include testing the admin flow with a real account, which "
+                 "would allow an attacker to escalate further.")
+    _, _, status, hist = run(obj, [call("http_request", {"url": BASE + "/"})]
+                             + [call("complete", {"summary": surrender})])
+    nudges = nudge_text(hist).lower()
+    check("S7 rejected", "complete rejected" in nudges and status != "COMPLETE",
+          f"status={status}")
+    check("S7 flagged hand-off phrasing",
+          "surrender" in nudges or "future tense" in nudges)
+
+
+def s8_session_cookie_not_auth():
+    print("\nS8 — a PHP session cookie is not an authentication bypass")
+    obj = f"Exploit {BASE}/login.php and get admin access."
+    replies = []
+    for i in range(3):
+        replies.append(call("http_request", {
+            "url": BASE + "/login.php", "method": "POST",
+            "body": "user_name=admin' OR '1'='1&user_password=x",
+            "headers": {"Content-Type": "application/x-www-form-urlencoded"}}))
+    conclusion = ("The suspected authentication bypass is not reproducible. "
+                  "No verified exploit: the login POST re-renders the login "
+                  "form and only issues a PHPSESSID cookie, which is not "
+                  "proof of an authenticated session.")
+    replies += [call("complete", {"summary": conclusion})] * 8
+    _, _, status, hist = run(obj, replies)
+    kinds = [e["kind"] for e in A.EVIDENCE]
+    strong_auth = [e for e in A.EVIDENCE
+                   if e["strong"] and "authenticated" in e["kind"]]
+    nudges = nudge_text(hist)
+    check("S8 no auth-bypass evidence from a bare PHPSESSID", not strong_auth,
+          str(kinds))
+    check("S8 cookie recorded only as a weak observation",
+          any("without authenticated state" in k for k in kinds), str(kinds))
+    check("S8 never reported COMPLETE", status != "COMPLETE", f"status={status}")
+    check("S8 terminated by itself", status in ("EXHAUSTED", "BLOCKED"),
+          f"status={status}")
+    check("S8 bounded steps", (A.mission.get("steps_used") or 0) <= 30,
+          f"steps={A.mission.get('steps_used')}")
+    check("S8 replay did not loop forever",
+          nudges.count("COMPLETE REJECTED") <= A.MAX_REJECTIONS,
+          f"rejections={nudges.count('COMPLETE REJECTED')}")
+
+
+def s9_honest_negative_closes():
+    print("\nS9 — an honest negative result closes the mission")
+    obj = f"Exploit {BASE} and prove admin access."
+    replies = [call("http_request", {"url": BASE + "/"})]
+    replies += [call("http_request", {"url": f"{BASE}/product?id={i}"})
+                for i in range(1, 10)]
+    conclusion = ("No verified exploit could be demonstrated on the target. "
+                  "The id parameter is not injectable, there is no "
+                  "authentication bypass, and no request was reproducible "
+                  "as an access-control failure.")
+    replies += [call("complete", {"summary": conclusion})] * 10
+    _, _, status, hist = run(obj, replies)
+    nudges = nudge_text(hist)
+    check("S9 closed without COMPLETE", status != "COMPLETE", f"status={status}")
+    check("S9 closed on the first honest negative, not by looping",
+          nudges.count("COMPLETE REJECTED") <= 1,
+          f"rejections={nudges.count('COMPLETE REJECTED')} status={status}")
+    # ASSESSED was added deliberately: a negative verdict the harness itself
+    # corroborates closes the mission as a graded assessment instead of looping.
+    check("S9 status is a terminal close",
+          status in ("EXHAUSTED", "BLOCKED", "ASSESSED"), f"status={status}")
+    reports = sorted(glob.glob(os.path.join(WS, "*.md")), key=os.path.getmtime)
+    txt = open(reports[-1], encoding="utf-8", errors="replace").read() if reports else ""
+    # The ASSESSED banner says "MISSION ASSESSED — ... the verdict is NEGATIVE ...
+    # this report is the assessment rather than a success claim". Both banners are
+    # honest closes; neither may present the negative as a compromise.
+    check("S9 report keeps an honest not-a-success banner",
+          ("MISSION NOT COMPLETED" in txt) or ("MISSION ASSESSED" in txt),
+          reports[-1] if reports else "no report")
+    check("S9 report never presents the negative as a success",
+          "MISSION COMPLETE" not in txt and "success condition satisfied" not in txt,
+          reports[-1] if reports else "no report")
+    check("S9 report records the agent's assessment as unverified",
+          "NOT accepted as a finding" in txt, txt[-300:].replace("\n", " ")[:200])
+
+
+def unit_checks():
+    print("\nUNIT — classification, novelty, evidence detectors")
+    check("U1 POST login is an attack",
+          A.classify_call("http_request",
+                          {"url": BASE + "/login", "method": "POST",
+                           "body": "username=admin'-- -"}) in ("attack", "exploit"))
+    check("U2 plain GET is recon",
+          A.classify_call("http_request", {"url": BASE + "/"}) == "recon")
+    g = A.ProgressGovernor(stall_steps=3, rounds=2)
+    for i in range(20):
+        g.observe(i, "http_request", f"k{i}",
+                  {"status": 404, "body": f"<h1>Not found</h1><p>/x{i}</p>"})
+    check("U3 unique-404 sweep counts as a stall", g.stalled(19),
+          f"novel={g.novel_total}")
+    check("U4 password file detected", "arbitrary file read" in
+          A._strong_hits("root:x:0:0:root:/root:/bin/bash"))
+    c = A.mission_contract("map the attack surface only, report only")
+    check("U5 recon objective does not require an exploit",
+          c["kind"] == "recon" and not c["requires_exploit"], str(c["kind"]))
+    c = A.mission_contract(f"find a working exploit on {BASE}")
     check("U6 exploit objective requires proof",
           c["requires_exploit"] and c["hard_mandate"], str(c))
 
