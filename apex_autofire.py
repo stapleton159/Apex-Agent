@@ -651,6 +651,221 @@ def fire_stalled(objective):
         with _lock:
             done = set(_STATE["fired"].keys())
         for cand in _wave2(objective):
+     l == "port_scan":
+            ports = d.get("open_ports") or d.get("open") or d.get("ports") or []
+            if isinstance(ports, list) and ports:
+                head = ", ".join(
+                    f"{x.get('port')}/{x.get('service') or '?'}" if isinstance(x, dict)
+                    else str(x) for x in ports[:12])
+                return (f"{d.get('open_count', len(ports))} open of {d.get('scanned', '?')} "
+                        f"scanned on {d.get('ip') or d.get('host')}: {head}")
+            return json.dumps(d, default=str)[:200]
+        if tool == "tls_info":
+            def cn(x):
+                if isinstance(x, dict):
+                    return str(x.get("commonName") or x.get("organizationName")
+                               or json.dumps(x)[:40])
+                return str(x or "?")
+            sans = d.get("san") or d.get("sans") or []
+            return (f"{d.get('tls_version')} {d.get('cipher')} issuer={cn(d.get('issuer'))} "
+                    f"subject={cn(d.get('subject'))} expires={d.get('not_after')} "
+                    f"days_left={d.get('days_until_expiry')} sans={len(sans)} "
+                    f"ca_verified={d.get('verified_by_ca_store')}")
+        if tool == "web_search":
+            rs = d.get("results") or []
+            return f"{len(rs)} hits: " + " | ".join(
+                f"{str(r.get('title'))[:70]} <{str(r.get('url'))[:70]}>" for r in rs[:4])
+        if tool == "ip_intel":
+            return json.dumps(d, default=str)[:200]
+        if tool == "env_check":
+            br = d.get("browser") or {}
+            tool_bins = d.get("installed_tools") or []
+            return (f"ca={'yes' if d.get('ca_bundle') or d.get('ca') else 'none'} "
+                    f"browser_backend={br.get('backend') if isinstance(br, dict) else br} "
+                    f"dns_stub={bool(d.get('dns_stub'))} "
+                    f"tools=[{', '.join(map(str, tool_bins[:10]))}] "
+                    f"cloudflared={'yes' if d.get('tunnel_binary') else 'no'}")
+        return json.dumps(d, default=str)[:220]
+    except Exception as e:  # summary must never break the brief
+        return f"(result present, summary error {type(e).__name__})"
+
+
+def _fire(entry):
+    t0 = time.time()
+    try:
+        res = APEX.call(entry["tool"], entry["args"])
+    except Exception as e:
+        res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"tool": entry["tool"], "args": entry["args"], "why": entry["why"],
+            "ok": _ok(res), "ms": int((time.time() - t0) * 1000),
+            "summary": _summary(entry["tool"], res), "raw": res}
+
+
+def _brief(objective, target, tags, fired):
+    lines = ["AUTOFIRE BRIEF — capabilities already fired by the harness for this "
+             "objective. Do NOT repeat these blindly; treat them as known state.",
+             f"objective: {objective[:240]}",
+             f"tags: {', '.join(tags) or 'none'} | target: {target.get('url') or target.get('host') or 'none'}",
+             ""]
+    ok_n = sum(1 for f in fired if f["ok"])
+    lines.append(f"{ok_n}/{len(fired)} capability calls succeeded.")
+    for f in fired:
+        arg = json.dumps(f["args"], default=str)[:130]
+        lines.append(f"- [{'ok' if f['ok'] else '!!'}] {f['tool']} {arg} "
+                     f"({f['ms']}ms) -> {f['summary']}")
+    dead = [f["tool"] for f in fired if not f["ok"]]
+    if dead:
+        lines.append("")
+        lines.append("Failed capabilities: " + ", ".join(sorted(set(dead))) +
+                     " — do not claim work from those; pick an alternative "
+                     "route or say plainly what is blocked.")
+    lines.append("")
+    lines.append("Your next action should build on the live state above.")
+    return "\n".join(lines)
+
+
+def preflight(objective, reuse=True, budget=TOTAL_BUDGET):
+    """Fire the implied plan. Returns {brief, tags, target, fired, cached}."""
+    tgt = target_of(objective)
+    tags = classify(objective)
+    pl = plan(objective, tgt)
+    key = hashlib.sha256((objective + json.dumps(pl, sort_keys=True)).encode()).hexdigest()[:16]
+    with _lock:
+        if reuse and _STATE["key"] == key and _STATE["brief"]:
+            return {"brief": _STATE["brief"], "tags": _STATE["tags"],
+                    "target": tgt, "fired": list(_STATE["fired"].values()),
+                    "cached": True}
+    fired = []
+    if pl:
+        # Deadline-bounded, completion-ordered. Waiting on futures in submission
+        # order let one slow call (a 400-name subdomain brute) hold the whole
+        # brief hostage for minutes; fast results are now kept regardless.
+        t0 = time.time()
+        ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        try:
+            futs = {ex.submit(_fire, e): e for e in pl}
+            pending = set(futs)
+            while pending:
+                left = budget - (time.time() - t0)
+                if left <= 1:
+                    break
+                done, pending = wait(pending, timeout=left,
+                                     return_when=FIRST_COMPLETED)
+                for fu in done:
+                    try:
+                        fired.append(fu.result(timeout=5))
+                    except Exception as e:
+                        fired.append({"tool": futs[fu]["tool"], "args": futs[fu]["args"],
+                                      "why": futs[fu]["why"], "ok": False, "ms": 0,
+                                      "summary": f"call did not return: {type(e).__name__}"})
+            for fu in pending:
+                e = futs[fu]
+                fired.append({"tool": e["tool"], "args": e["args"], "why": e["why"],
+                              "ok": False, "ms": int((time.time() - t0) * 1000),
+                              "summary": "still running when the autofire budget ran "
+                                         "out — it keeps running in the background, "
+                                         "re-query this capability later"})
+                fu.cancel()
+        finally:
+            ex.shutdown(wait=False)
+    br = _brief(objective, tgt, tags, fired)
+    with _lock:
+        _STATE.update({"key": key, "brief": br, "tags": tags, "at": time.time(),
+                       "objective": objective,
+                       "fired": {f"{f['tool']}|{json.dumps(f['args'], sort_keys=True)}": f
+                                 for f in fired}})
+    return {"brief": br, "tags": tags, "target": tgt, "fired": fired, "cached": False}
+
+
+def _open_ports():
+    """Ports that a fired port_scan actually found open."""
+    with _lock:
+        fired = list(_STATE.get("fired", {}).values())
+    out = set()
+    for f in fired:
+        if f.get("tool") != "port_scan":
+            continue
+        d = (f.get("raw") or {})
+        d = d.get("data", d) if isinstance(d, dict) else {}
+        for p in (d.get("open_ports") or d.get("open") or []):
+            try:
+                out.add(int(p.get("port") if isinstance(p, dict) else p))
+            except (TypeError, ValueError):
+                continue
+    return sorted(p for p in out if 0 < p < 65536)
+
+
+HTTP_PORTS = {80, 3000, 5000, 8000, 8008, 8080, 8081, 8088, 8888, 9000, 9090}
+TLS_PORTS = {443, 8443, 9443}
+
+
+def _wave2(objective):
+    """Second wave: capabilities implied by what the first wave FOUND.
+
+    Without this, a mission whose plan was fully fired at pre-flight has
+    nothing left for the stall rescue to run, so a stalled model keeps
+    re-probing the same surface until the governor closes the mission. The
+    second wave reads the recorded results (open ports, the target's own
+    service) and turns them into new, specific probes.
+    """
+    tgt = target_of(objective)
+    host, url = tgt.get("host"), tgt.get("url")
+    out = []
+
+    def add(tool, args, why, weight=6):
+        for e in out:
+            if e["tool"] == tool and e["args"] == args:
+                return
+        out.append({"tool": tool, "args": args, "why": why, "weight": weight})
+
+    ports = _open_ports()
+    for p in ports[:6]:
+        if p in TLS_PORTS:
+            add("http_probe", {"url": f"https://{host}:{p}"},
+                "fingerprint the TLS service on a port the scan proved open", 9)
+            add("tls_info", {"host": host, "port": p},
+                "capture the certificate on that port", 7)
+        else:
+            add("http_probe", {"url": f"http://{host}:{p}"},
+                "fingerprint the service on a port the scan proved open", 9)
+            add("fetch_url", {"url": f"http://{host}:{p}/robots.txt", "action": "text"},
+                "robots.txt often lists the paths worth looking at", 5)
+    if not ports and host and not _is_ip(host):
+        add("dns_enum", {"action": "subdomains", "domain": host,
+                         "brute": True, "max": 200},
+            "no open ports found: widen the surface by name", 6)
+    if host and not _is_ip(host) and not str(host).startswith("127."):
+        add("web_search", {"queries": [f"{host} CVE vulnerability advisory"], "limit": 6},
+            "ground the target in public vulnerability data", 4)
+    if url:
+        add("fetch_url", {"url": url, "action": "sitemap"},
+            "a sitemap exposes routes the landing page hides", 4)
+    return out
+
+
+def stalled_action(objective):
+    """Next un-fired capability for a stalled mission, or None.
+
+    The harness executes this itself, so a stalled model still produces new
+    information instead of another identical probe.
+    """
+    tgt = target_of(objective)
+    with _lock:
+        done = set(_STATE["fired"].keys())
+    for e in plan(objective, tgt):
+        if f"{e['tool']}|{json.dumps(e['args'], sort_keys=True)}" not in done:
+            return e
+    return None
+
+
+def fire_stalled(objective):
+    """Run the next un-fired capability and return (entry, result) or (None, None)."""
+    e = stalled_action(objective)
+    if not e:
+        # Plan exhausted: escalate to the state-derived second wave.
+        with _lock:
+            done = set(_STATE["fired"].keys())
+        for cand in _wave2(objective):
             if f"{cand['tool']}|{json.dumps(cand['args'], sort_keys=True)}" not in done:
                 e = cand
                 break
