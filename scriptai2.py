@@ -486,6 +486,260 @@ def suggest_actions(objective):
 # ==========================================================================
 # ATTACK CLASSIFICATION — payload-based, never method-based
 # ==========================================================================
+# A call is offensive only when it carries an aies that subsequent calls automatically reuse.
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (APEX-Agent)"})
+
+
+def _grep_p_supported():
+    if not SHELL_BIN:
+        return False
+    try:
+        p = subprocess.run("echo test1 | grep -oP '(?<=t)est'", shell=True,
+                           executable=SHELL_BIN, capture_output=True, text=True,
+                           timeout=10)
+        return p.returncode == 0 and p.stdout.strip() == "est"
+    except Exception:
+        return False
+
+
+GREP_P_OK = _grep_p_supported()
+
+# ==========================================
+# DEVICE PROFILE & TOOL DISCOVERY
+# ==========================================
+
+TOOLS = ["curl", "wget", "whois", "dig", "git", "python3", "pip", "gcc",
+         "openssl", "strings", "file", "find", "grep", "awk", "sed", "nmap",
+         "sqlmap", "nikto", "ffuf", "gobuster", "dirb", "hydra", "john",
+         "hashcat", "nc", "netcat", "socat", "tcpdump", "masscan", "whatweb",
+         "wafw00f", "subfinder", "httpx", "nuclei", "amass", "theHarvester",
+         "dirsearch", "arjun", "wpscan", "dnsrecon", "smbclient", "sslscan",
+         "feroxbuster", "rustscan", "exiftool"]
+
+# ==========================================================================
+# CAPABILITY LAYER (apex_tools)
+# ==========================================================================
+# Everything below used to fail for environment reasons rather than model
+# reasons: no /etc/resolv.conf (so dnspython and every Go binary died), no CA
+# bundle for Go TLS, no nmap/dig/openssl/chromium, no /tmp. apex_tools owns
+# those problems once, for every tool: DoH resolution + a localhost DNS stub,
+# a CA bundle in the child environment, a render-proxy browser, GitHub/download
+# provisioning, and cloudflared tunnels.
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+BIN_DIR = os.path.join(APP_ROOT, "bin")
+os.makedirs(BIN_DIR, exist_ok=True)
+if BIN_DIR not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = BIN_DIR + os.pathsep + os.environ.get("PATH", "")
+
+try:
+    import apex_tools as APEX
+    APEX_OK = True
+    APEX_ERR = ""
+except Exception as _apex_e:          # pragma: no cover - defensive
+    APEX = None
+    APEX_OK = False
+    APEX_ERR = f"{type(_apex_e).__name__}: {_apex_e}"
+
+# Subprocesses (curl, git, go binaries) need a CA store and a DNS stub too.
+if APEX_OK:
+    try:
+        _CA = APEX._ca_bundle()
+        if _CA:
+            os.environ.setdefault("SSL_CERT_FILE", _CA)
+            os.environ.setdefault("CURL_CA_BUNDLE", _CA)
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA)
+    except Exception:
+        pass
+    if os.environ.get("APEX_NO_DNS_STUB", "0") != "1":
+        try:
+            APEX.DNS_STUB.start()
+        except Exception:
+            pass
+
+try:
+    import apex_autofire as AUTOFIRE
+    _AUTOFIRE_ERR = ""
+except Exception as _af_e:            # pragma: no cover - defensive
+    AUTOFIRE = None
+    _AUTOFIRE_ERR = f"{type(_af_e).__name__}: {_af_e}"
+
+try:
+    import apex_lab as LAB
+    _LAB_ERR = ""
+except Exception as _lab_e:            # pragma: no cover - defensive
+    LAB = None
+    _LAB_ERR = f"{type(_lab_e).__name__}: {_lab_e}"
+
+try:
+    import apex_oracle as ORACLE
+    _ORACLE_ERR = ""
+except Exception as _orc_e:            # pragma: no cover - defensive
+    ORACLE = None
+    _ORACLE_ERR = f"{type(_orc_e).__name__}: {_orc_e}"
+
+# Self-edit: the operator asks for a capability the harness does not have, the
+# engine patches these sources, validates them and hands the restart to an
+# independent supervisor. Degrades to nothing when the module is absent.
+try:
+    import apex_selfedit as SELFEDIT
+    SELFEDIT_OK = True
+    SELFEDIT_ERR = None
+except Exception as _se:              # pragma: no cover - degrade, do not fail
+    SELFEDIT = None
+    SELFEDIT_OK = False
+    SELFEDIT_ERR = f"{type(_se).__name__}: {_se}"
+
+APEX_TOOL_NAMES = ("dns_enum", "fetch_url", "github", "download", "extract",
+                   "provision", "tls_info", "ip_intel", "http_probe", "tunnel",
+                   "env_check", "autofire", "lab")
+APEX_UPGRADED = ("web_search", "open_url", "dns_lookup", "port_scan", "browser")
+APEX_DOC = (APEX.tool_help() if APEX_OK
+            else f"(capability layer unavailable: {APEX_ERR})")
+
+
+AVAILABLE = {t: shutil.which(t) for t in TOOLS if shutil.which(t)}
+
+
+def _has_module(name):
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
+BROWSER_OK = _has_module("playwright")
+DNSPY_OK = _has_module("dns.resolver") or _has_module("dns")
+
+PROFILE = {
+    "platform": platform.platform(), "kernel": platform.release(),
+    "arch": platform.machine(), "hostname": platform.node(),
+    "python": sys.version.split()[0], "termux": IS_TERMUX,
+    "root_available": HAS_ROOT, "shell": SHELL_BIN,
+    "user": os.environ.get("USER", os.environ.get("LOGNAME", "unknown")),
+    "home": os.path.expanduser("~"), "cwd": WORKSPACE,
+    "cpu_count": os.cpu_count(), "memory": "n/a", "disk": "n/a",
+    "browser_control": BROWSER_OK,
+}
+try:
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemTotal:"):
+                PROFILE["memory"] = f"{int(line.split()[1]) // 1024} MB"
+                break
+except Exception:
+    try:
+        PROFILE["memory"] = f"{shutil.disk_usage(WORKSPACE).free // (2**30)}GB free"
+    except Exception:
+        pass
+try:
+    u = shutil.disk_usage(WORKSPACE)
+    PROFILE["disk"] = f"{u.free // (2**30)}GB free / {u.total // (2**30)}GB total"
+except Exception:
+    pass
+
+TOOL_LIST = "\n".join(f" {k}: {v}" for k, v in sorted(AVAILABLE.items())) or " (none)"
+# Registered in-process tools do not need a binary on PATH, so they are listed
+# separately: without this the model assumed the capability was missing.
+if APEX_OK:
+    TOOL_LIST += ("\n in-process agent tools (no binary required): "
+                  + ", ".join(sorted(APEX.TOOL_SPECS)))
+    TOOL_LIST += f"\n browser: working via the {APEX.BROWSER.backend} backend (tool=browser)"
+elif BROWSER_OK:
+    TOOL_LIST += "\n browser: playwright headless Chromium (tool=browser)"
+else:
+    TOOL_LIST += "\n browser: renderer backend (tool=browser)"
+
+# ============================================================
+# TOOL AVAILABILITY STATE
+# ============================================================
+
+UNAVAILABLE = {}
+TOOL_FAILS = {}
+LAST_TOOL_RESULT = {}
+
+
+def blacklist_tool(binary, reason):
+    if binary and binary not in UNAVAILABLE:
+        UNAVAILABLE[binary] = reason
+        print(f"[APEX HARNESS] BLACKLISTED '{binary}': {reason}")
+        ui_event("WARN", "think", f"tool blacklisted: {binary} — {reason[:100]}")
+
+
+def detect_not_found(output):
+    for p in (r"([\w.\-]+): command not found", r"([\w.\-]+): not found",
+              r"'([\w.\-]+)' is not recognized", r"bash: ([\w.\-]+): command not found",
+              r"sh: ([\w.\-]+): (?:command )?not found"):
+        m = re.search(p, output, re.IGNORECASE)
+        if m and m.group(1) not in ("bin", "sh", "bash"):
+            blacklist_tool(m.group(1), "command not found in PATH")
+            return m.group(1)
+    return None
+
+
+def verify_install(command):
+    m = re.search(r"\b(?:pip3?|pkg|apt(?:-get)?|brew|go install|cargo install)\s+"
+                  r"(?:install|add)\s+(\S+)", command)
+    if not m:
+        return None, None
+    pkg = m.group(1)
+    if shutil.which(pkg):
+        AVAILABLE.setdefault(pkg, shutil.which(pkg))
+        return pkg, None
+    blacklist_tool(pkg, "install ran but binary still absent (pip pkg ≠ CLI tool)")
+    return None, (f"INSTALL VERIFICATION FAILED: '{pkg}' still not in PATH after "
+                  f"`{command}`. Blacklisted — choose a different tool/approach.")
+
+
+def not_found_alternatives(binary):
+    if binary == "nuclei":
+        return ["nikto -h <url> (if installed)", "http_request probes of common paths"]
+    if binary in ("gobuster", "feroxbuster", "dirb", "dirsearch"):
+        return ["python3 wordlist brute via http_request (write_file a script, then execute)"]
+    return ["tool=http_request / open_url", "tool=web_search",
+            "grep cached fetch files"]
+
+
+# ==========================================
+# PLAYBOOKS
+# ==========================================
+
+PLAYBOOKS = {
+    "web": [
+        "http_request the target; response includes links + security-header audit",
+        "extract_links on the target URL — NO grep needed for hrefs/src",
+        "sitemap_urls on /sitemap.xml to harvest the full URL list",
+        "probe /robots.txt /sitemap.xml /.env /wp-json/ /api/ via http_request",
+        "browser_navigate the target for a JS-rendered view",
+        "curl -sI <url> for header audit",
+        "POST candidate creds to wp-login.php via http_request (method=POST!)",
+        "sqlmap -u <url> --batch --forms --dbs (if installed)",
+        "wpscan --url <url> --enumerate vp,vt,u (if installed)",
+    ],
+    "network": ["nmap -sV --top-ports 1000 <host>", "tool=port_scan <host> 1-1000",
+                "tool=dns_lookup <domain>"],
+    "osint": ["tool=web_search variants", "tool=whois_lookup <domain>",
+              "http_request https://crt.sh/?q=<domain>&output=json"],
+    "generic": ["list_files", "grep cached fetches", "deepen best lead"],
+}
+
+
+def suggest_actions(objective):
+    o = objective.lower()
+    if re.search(r"\b(web|http|wordpress|wp|site|url|api|cms|xss|sqli|csrf)\b", o):
+        pool = PLAYBOOKS["web"]
+    elif re.search(r"\b(network|host|port|smb|snmp|scan|subnet)\b", o):
+        pool = PLAYBOOKS["network"]
+    elif re.search(r"\b(osint|recon|intel|footprint)\b", o):
+        pool = PLAYBOOKS["osint"]
+    else:
+        pool = PLAYBOOKS["generic"]
+    return pool[:8] or PLAYBOOKS["generic"]
+
+# ==========================================================================
+# ATTACK CLASSIFICATION — payload-based, never method-based
+# ==========================================================================
 # A call is offensive only when it carries an actual payload or a credential /
 # access-control probe. The old rule ("any POST is an attack") inflated the
 # ledger with plain login-form reads, so the count stopped meaning anything.
