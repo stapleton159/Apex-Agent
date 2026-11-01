@@ -63,7 +63,7 @@ ANCHORS = {
     ],
 }
 
-MAX_ITERS = int(os.environ.get("SELFEDIT_MAX_ITERS", "3"))
+MAX_ITERS = int(os.environ.get("SELFEDIT_MAX_ITERS", "4"))
 MAX_PATCH = int(os.environ.get("SELFEDIT_MAX_PATCH", "160000"))
 HEALTH_TIMEOUT = int(os.environ.get("SELFEDIT_HEALTH_TIMEOUT", "60"))
 FIND_MIN = 12
@@ -405,36 +405,103 @@ def _shift(text, delta):
     return "".join(out)
 
 
+def _char_delta(anchor, cand):
+    """Point at the first character where the guess and the file disagree."""
+    if anchor == cand:
+        return ""
+    n = min(len(anchor), len(cand))
+    i = 0
+    while i < n and anchor[i] == cand[i]:
+        i += 1
+    mine = anchor[i:i + 1] or "<end of line>"
+    theirs = cand[i:i + 1] or "<end of line>"
+    return ("That line differs at character %d: the file has %r, your 'find' "
+            "has %r." % (i + 1, theirs, mine))
+
+
+def _block_mismatch(flat, flines, start):
+    """First line where the guessed block and the file disagree."""
+    for j, want in enumerate(flines):
+        if start + j >= len(flat):
+            return ("Your 'find' has %d line(s), but the file ends at line %d of "
+                    "that block." % (len(flines), start + j + 1))
+        have = flat[start + j]
+        if want != have:
+            ratio = difflib.SequenceMatcher(None, want, have).ratio()
+            return ("Line %d of your 'find' does not match line %d of the file "
+                    "(%.0f%% similar). %s"
+                    % (j + 1, start + j + 1, ratio * 100,
+                       _char_delta(want, have)))
+    return ""
+
+
+def _best_match(text, find):
+    """Where an absent 'find' most likely meant to land: (score, start, span).
+
+    `start` is a 0-based file line index and `span` how many lines the guess
+    covered, which is enough to hand the model the exact surrounding bytes
+    instead of only telling it that its guess was wrong.
+    """
+    anchors = [l.strip() for l in find.splitlines() if len(l.strip()) >= 6]
+    if not anchors:
+        return None
+    flat = [s[0].strip() for s in _line_spans(text)]
+    best = None
+    for anchor in sorted(anchors, key=len, reverse=True)[:3]:
+        for cand in difflib.get_close_matches(anchor, flat, n=1, cutoff=0.55):
+            score = difflib.SequenceMatcher(None, anchor, cand).ratio()
+            if best is None or score > best[0]:
+                best = (score, flat.index(cand), anchor)
+        if best and best[0] > 0.92:
+            break
+    if not best:
+        return None
+    score, idx, anchor = best
+    flines = [l.strip() for l in find.splitlines()]
+    fidx = flines.index(anchor) if anchor in flines else 0
+    start = max(0, idx - fidx)
+    return score, start, max(1, len(flines)), fidx
+
+
 def _nearest(text, find, context=3, limit=420):
     """Closest actual text to an absent `find`, for the retry prompt.
 
     Turns "not present, try again" into "here is what is actually there", so
     the next iteration copies real bytes instead of guessing again.
     """
-    anchors = [l.strip() for l in find.splitlines() if len(l.strip()) >= 6]
-    if not anchors:
-        return "(no usable anchor line to compare against)"
     spans = _line_spans(text)
     flat = [s[0].strip() for s in spans]
-    best = None
-    for anchor in sorted(anchors, key=len, reverse=True)[:3]:
-        for cand in difflib.get_close_matches(anchor, flat, n=1, cutoff=0.55):
-            score = difflib.SequenceMatcher(None, anchor, cand).ratio()
-            if best is None or score > best[0]:
-                best = (score, flat.index(cand))
-        if best and best[0] > 0.92:
-            break
+    best = _best_match(text, find)
     if not best:
+        if not [l for l in find.splitlines() if len(l.strip()) >= 6]:
+            return "(no usable anchor line to compare against)"
         return ("No line in 'find' resembles this file — the code may not exist "
                 "yet. Request the exact bytes first: "
                 "{\"read\": [\"<file>:<start>-<end>\"]}")
-    score, idx = best
-    lo, hi = max(0, idx - context), min(len(spans), idx + context + 1)
-    body = "".join("%s| %s" % (str(n + 1).rjust(5), spans[n][0].rstrip())
-                   for n in range(lo, hi))
-    return ("Closest actual text (line %d, %.0f%% similar) — the 'NNNNN| ' prefix "
-            "is a line number, NOT file content:\n%s"
-            % (idx + 1, score * 100, body[:limit]))
+    score, start, span, fidx = best
+    idx = start
+    # Align the guess against the file line by line: comparing only the anchor
+    # line said "100% similar" while some *other* line in the block was the one
+    # that did not exist, which told the model nothing actionable.
+    flines = [l.strip() for l in find.splitlines()]
+    mismatch = _block_mismatch(flat, flines, start)
+    if span > 6:
+        limit = max(limit, 1400)
+    lo = max(0, start - context)
+    hi = min(len(spans), start + span + context)
+    # One real line per line: joining these with "" produced a single fake
+    # line, and the model then rebuilt its 'find' as one long line and failed
+    # again with "100% similar" but absent.
+    body = "\n".join("%s| %s" % (str(n + 1).rjust(5), spans[n][0].rstrip())
+                    for n in range(lo, hi))
+    note = ("Closest actual text (line %d, %.0f%% similar) — the 'NNNNN| ' prefix "
+            "is a line number, NOT file content. Copy these bytes exactly."
+            % (idx + 1, score * 100))
+    if mismatch:
+        note += " " + mismatch
+    elif start + fidx < len(flat) and flat[start + fidx] != flines[fidx]:
+        note += " " + _char_delta(flines[fidx], flat[start + fidx])
+    return note + "\n" + body[:limit]
 
 
 # Bounds for {"read": [...]} requests from the model.
@@ -517,6 +584,7 @@ def apply_ops(ops):
     staged = {}
     errs = []
     notes = []
+    misses = []
     if not isinstance(ops, list) or not ops:
         return {"ok": False, "errors": ["no ops supplied"], "staged": {}, "files": []}
     total = 0
@@ -539,7 +607,10 @@ def apply_ops(ops):
                         % (i, len(find), FIND_MIN))
             continue
         if find == rep:
-            errs.append("op %d: 'find' equals 'replace' (no-op)" % i)
+            # A model often re-sends an op it had already applied. That is
+            # redundant, not wrong, so skip it instead of failing the whole
+            # batch (which used to discard good ops alongside it).
+            notes.append("op %d (%s): skipped, 'find' equals 'replace'" % (i, rel))
             continue
         text = staged.get(rel)
         if text is None:
@@ -555,8 +626,18 @@ def apply_ops(ops):
                             "ignoring indentation — include more surrounding "
                             "lines" % (i, rel, hit["hits"]))
             else:
-                errs.append("op %d (%s): 'find' is not in the file. %s"
-                            % (i, rel, _nearest(text, find)))
+                # Echo the guess back: without it the model cannot tell that it
+                # edited the wrong function and repeats the same block.
+                guess = ((find.strip().splitlines() or [""])[0])[:110]
+                errs.append("op %d (%s): 'find' is not in the file (yours began "
+                            "with %r). %s"
+                            % (i, rel, guess, _nearest(text, find)))
+                bm = _best_match(text, find)
+                if bm:
+                    # Remember where the guess meant to land, so the loop can
+                    # hand over those real bytes instead of only the complaint.
+                    misses.append({"file": rel, "line": bm[1] + 1,
+                                   "span": bm[2]})
             continue
         new = rep if hit["mode"] == "exact" else _shift(rep, hit["indent_delta"])
         staged[rel] = text[:hit["start"]] + new + text[hit["end"]:]
@@ -567,66 +648,49 @@ def apply_ops(ops):
         total += len(rep)
     if total > MAX_PATCH:
         errs.append("patch too large: %d chars > %d" % (total, MAX_PATCH))
+    if not errs and not staged:
+        errs.append("nothing to apply: every op was a no-op, so the request "
+                    "did not describe a real change")
     if errs:
         return {"ok": False, "errors": errs, "staged": {}, "files": [],
-                "notes": notes}
+                "notes": notes, "misses": misses}
     return {"ok": True, "errors": [], "staged": staged,
-            "files": sorted(staged), "notes": notes}
+            "files": sorted(staged), "notes": notes, "misses": []}
 
 
-def _commit(staged):
-    for rel, text in staged.items():
-      ing is written until _commit()."""
-    scope = _scope_files()
-    staged = {}
-    errs = []
-    if not isinstance(ops, list) or not ops:
-        return {"ok": False, "errors": ["no ops supplied"], "staged": {}, "files": []}
-    total = 0
-    for i, op in enumerate(ops, 1):
-        if not isinstance(op, dict):
-            errs.append("op %d: not an object" % i)
+def _serve_misses(st, misses):
+    """Put the real bytes around a missed 'find' into the next prompt.
+
+    Telling the model "100% similar, copy these bytes" did not work while the
+    region itself was never in the prompt: it rebuilt the same block from memory
+    and missed again, four iterations in a row. Serving the region turns the
+    retry into a copy instead of a second guess.
+    """
+    specs = []
+    for m in (misses or [])[:3]:
+        try:
+            line = int(m.get("line") or 1)
+            span = int(m.get("span") or 1)
+            rel = _norm_rel(m.get("file"))
+        except Exception:
             continue
-        rel = _norm_rel(op.get("file"))
-        if rel not in scope:
-            errs.append("op %d: '%s' is not an editable file (allowed: %s)"
-                        % (i, rel or "?", ", ".join(sorted(scope))))
+        if not rel:
             continue
-        find = op.get("find")
-        rep = op.get("replace")
-        if not isinstance(find, str) or not isinstance(rep, str):
-            errs.append("op %d: 'find' and 'replace' must be strings" % i)
-            continue
-        if len(find) < FIND_MIN:
-            errs.append("op %d: 'find' is %d chars — needs >=%d to be unique"
-                        % (i, len(find), FIND_MIN))
-            continue
-        if find == rep:
-            errs.append("op %d: 'find' equals 'replace' (no-op)" % i)
-            continue
-        text = staged.get(rel)
-        if text is None:
-            try:
-                text = _read(rel)
-            except Exception as e:
-                errs.append("op %d: cannot read %s: %s" % (i, rel, e))
-                continue
-        n = text.count(find)
-        if n == 0:
-            errs.append("op %d (%s): 'find' not present — copy the exact bytes "
-                        "from the excerpt" % (i, rel))
-            continue
-        if n > 1:
-            errs.append("op %d (%s): 'find' occurs %d times — add surrounding "
-                        "lines for uniqueness" % (i, rel, n))
-            continue
-        staged[rel] = text.replace(find, rep, 1)
-        total += len(rep)
-    if total > MAX_PATCH:
-        errs.append("patch too large: %d chars > %d" % (total, MAX_PATCH))
-    if errs:
-        return {"ok": False, "errors": errs, "staged": {}, "files": []}
-    return {"ok": True, "errors": [], "staged": staged, "files": sorted(staged)}
+        lo = max(1, line - 6)
+        hi = lo + min(READ_MAX_LINES, span + 28) - 1
+        specs.append("%s:%d-%d" % (rel, lo, hi))
+    if not specs:
+        return 0
+    block, notes = read_ranges(specs)
+    ctx = st.setdefault("_ctx", [])
+    if block:
+        ctx.append("AUTO-SERVED after a missed 'find' — these are the bytes your "
+                   "last op was aiming at, copied from disk just now. Rebuild "
+                   "'find' from them exactly.\n" + block)
+    for note in notes:
+        ctx.append("READ NOTICE: " + str(note)[:300])
+    del ctx[:-READ_KEEP]
+    return block.count("\n") + (1 if block else 0)
 
 
 def _commit(staged):
@@ -645,6 +709,226 @@ def _anchors(rel, baseline=None):
     if not base:
         return []
     return [a for a in want if a in base]
+
+
+_HANDLER_RE = re.compile(
+    r"\bon(?:click|change|submit|input|keyup|keydown|blur|focus|dblclick)"
+    r"\s*=\s*[\"']\s*(?:window\.)?\s*([A-Za-z_$][\w$]*)\s*\(")
+_GETID_RE = re.compile(
+    r"getElementById\(\s*[\"']([^\"']+)[\"']\s*\)|"
+    r"querySelector\(\s*[\"']#([\w-]+)[\"']\s*\)")
+
+
+def _js_def_positions(text, name):
+    """Every place this name is defined, as (offset, reachable_on_window)."""
+    esc = re.escape(name)
+    pats = ((r"window\.%s\s*=" % esc, True),
+            (r"function\s+%s\s*\(" % esc, False),
+            (r"(?:const|let|var)\s+%s\s*=" % esc, False),
+            (r"\b%s\s*=\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>|" % esc
+             + r"[A-Za-z_$][\w$]*\s*=>)", False),
+            (r"\b%s\s*:\s*(?:async\s*)?function\b" % esc, False))
+    out = []
+    for pat, on_window in pats:
+        for m in re.finditer(pat, text):
+            out.append((m.start(), on_window))
+    return out
+
+
+def _scope_depth(text, pos):
+    """How many (function(){ ... })() wrappers enclose this offset.
+
+    Inline attributes such as onclick="f()" are resolved against window, so a
+    helper declared inside an IIFE exists but cannot be called from the markup.
+    """
+    before = text[:pos]
+    opens = len(re.findall(r"\(\s*function\s*\([^)]*\)\s*\{", before))
+    closes = len(re.findall(r"\}\s*\)\s*\(", before))
+    return max(0, opens - closes)
+
+
+def _js_defined(text, name):
+    return bool(_js_def_positions(text, name))
+
+
+def _added_lines(new, old):
+    """Lines this edit introduced, so old unrelated code is never blamed."""
+    if not old:
+        return new.splitlines()
+    added = []
+    for ln in difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                   lineterm="", n=0):
+        if ln.startswith("+") and not ln.startswith("+++"):
+            added.append(ln[1:])
+    return added
+
+
+_BARE_CALL_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(")
+_WINDOW_CALL_RE = re.compile(r"\bwindow\.([A-Za-z_$][\w$]*)\s*\(")
+_JS_KEYWORDS = {"if", "for", "while", "switch", "catch", "return", "typeof",
+                "function", "new", "delete", "void", "do", "else", "with"}
+
+_ROUTE_RE = re.compile(r"@APP\.route\(([^)]*)\)")
+_URL_RE = re.compile(r"[\"']([^\"']+)[\"']")
+_METHODS_RE = re.compile(r"methods\s*=\s*\[([^\]]*)\]")
+_JS_CALL_RE = re.compile(
+    r"\bj(post|get|put|del|delete|patch)\s*\(\s*[\"'](/[^\"']*)[\"']")
+_FETCH_RE = re.compile(
+    r"\bfetch\s*\(\s*[\"'](/[^\"']*)[\"']"
+    r"(?:\s*,\s*\{[^}]*?method\s*:\s*[\"'](\w+)[\"'])?", re.S)
+
+
+def _routes(text):
+    """url -> allowed methods, from the harness that is about to serve it."""
+    out = {}
+    for decl in _ROUTE_RE.findall(text or ""):
+        m = _URL_RE.search(decl)
+        if not m:
+            continue
+        allowed = _METHODS_RE.search(decl)
+        verbs = ([v.upper() for v in _URL_RE.findall(allowed.group(1))]
+                 if allowed else ["GET"])
+        out[m.group(1)] = set(verbs) | {"HEAD", "OPTIONS"}
+    return out
+
+
+def _route_match(routes, url):
+    if url in routes:
+        return url
+    for pat in routes:
+        if "<" in pat:
+            rx = "^" + re.sub(r"<[^>]+>", "[^/]+", pat) + "$"
+            if re.match(rx, url):
+                return pat
+    return None
+
+
+def _endpoint_errors(text, old, server_text):
+    """An added call must hit a route that exists with that method.
+
+    The loop happily validated a button that posted to a GET-only /health, so it
+    reported success for a control that could only ever receive 405.
+    """
+    routes = _routes(server_text)
+    if not routes:
+        return []
+    out = []
+    added = "\n".join(_added_lines(text, old))
+    calls = []
+    for verb, url in _JS_CALL_RE.findall(added):
+        calls.append((verb.upper().replace("DEL", "DELETE"), url))
+    for url, method in _FETCH_RE.findall(added):
+        calls.append(((method or "GET").upper(), url))
+    for verb, url in calls:
+        if "${" in url or "+" in url:      # built at runtime, cannot be checked
+            continue
+        pat = _route_match(routes, url)
+        if not pat or verb in routes[pat]:
+            continue
+        out.append("the edit calls %s with %s, but the server only routes it "
+                   "for %s — that request can only fail with 405. Use %s or add "
+                   "the method to the route."
+                   % (url, verb, "/".join(sorted(routes[pat] - {"HEAD", "OPTIONS"})),
+                      "/".join(sorted(routes[pat] - {"HEAD", "OPTIONS"}))))
+    return out
+
+
+def _brace_body(text, pos):
+    """The {...} block starting at or after pos."""
+    i = text.find("{", pos)
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i:j + 1]
+    return text[i:]
+
+
+def _unreachable_calls(text, old):
+    """A global handler that calls a name living inside the page's IIFE.
+
+    The loop accepted a button whose handler called toast(), which the page
+    declares inside (function(){ ... })(). The click copied the JSON and then
+    threw ReferenceError, so the operator got no feedback at all.
+    """
+    out = []
+    added = "\n".join(_added_lines(text, old))
+    for name in sorted(set(_HANDLER_RE.findall(added))):
+        for pos, on_window in _js_def_positions(text, name):
+            if not on_window and _scope_depth(text, pos) != 0:
+                continue                      # already reported as unreachable
+            body = _brace_body(text, pos)
+            # a bare name only: console.log( is a member call, not log()
+            for callee in sorted(set(_BARE_CALL_RE.findall(body))):
+                if callee == name or callee in _JS_KEYWORDS:
+                    continue
+                defs = _js_def_positions(text, callee)
+                if not defs:
+                    continue                  # browser API or not in this file
+                if any(g or _scope_depth(text, p) == 0 for p, g in defs):
+                    continue
+                out.append("%s() calls %s(), but %s only exists inside the "
+                           "page's function wrapper, so calling it from an inline "
+                           "handler throws ReferenceError. Expose it as "
+                           "window.%s = ... as well." % (name, callee, callee, callee))
+            # window.x(...) is not a bare call: writing `function x(){}` inside the
+            # wrapper does NOT create window.x, so this looked wired while the
+            # click threw "window.x is not a function".
+            for callee in sorted(set(_WINDOW_CALL_RE.findall(body))):
+                defs = _js_def_positions(text, callee)
+                if not defs or any(g for p, g in defs):
+                    continue                  # browser API, or really on window
+                out.append("%s() calls window.%s(), but %s is only declared inside "
+                           "the page's function wrapper — that does not create "
+                           "window.%s, so the click throws. Add window.%s = "
+                           "function (...) { ... } inside the wrapper."
+                           % (name, callee, callee, callee, callee))
+    # one definition can be found twice (window.x = ... matches both forms), so
+    # report each distinct problem once instead of a doubled message
+    seen, uniq = set(), []
+    for err in out:
+        if err not in seen:
+            seen.add(err)
+            uniq.append(err)
+    return uniq
+
+
+def _wiring_errors(text, old):
+    """A control the edit adds must actually be wired to something.
+
+    The loop used to accept `onclick="copyHealth()"` with no copyHealth anywhere,
+    so it reported success for a button that could only throw on click. Only
+    references introduced by this edit are judged; pre-existing loose ends in the
+    file are left alone.
+    """
+    out = []
+    added = "\n".join(_added_lines(text, old))
+    for name in sorted(set(_HANDLER_RE.findall(added))):
+        defs = _js_def_positions(text, name)
+        if not defs:
+            out.append("the edit wires a control to %s(), but no %s function "
+                       "exists in the file — the control would do nothing. "
+                       "Add the handler in the same change." % (name, name))
+        elif not any(glob or _scope_depth(text, pos) == 0
+                     for pos, glob in defs):
+            out.append("the edit wires a control to %s(), but %s is only "
+                       "defined inside a function wrapper, so an inline "
+                       "handler cannot reach it. Expose it as window.%s = "
+                       "function (...) { ... } instead."
+                       % (name, name, name))
+    for pair in _GETID_RE.findall(added):
+        ident = (pair[0] or pair[1]).strip()
+        if not ident:
+            continue
+        if not re.search(r"id\s*=\s*[\"']%s[\"']" % re.escape(ident), text):
+            out.append("the edit looks up element id %r, which does not exist "
+                       "in the page. Add the element or fix the id." % ident)
+    return out
 
 
 def validate(rels, dest):
@@ -697,6 +981,19 @@ def validate(rels, dest):
             if not ok:
                 errors.append("%s shrank to %.0f%% of its previous size"
                               % (rel, shrink * 100))
+
+        # a UI edit that adds a control must also wire it
+        if rel.endswith(".html") or "<script" in text:
+            wiring = _wiring_errors(text, old)
+            try:
+                server = _read("scriptai2.py")
+            except Exception:
+                server = ""
+            wiring += _endpoint_errors(text, old, server)
+            wiring += _unreachable_calls(text, old)
+            checks.append({"check": "%s controls are wired" % rel,
+                           "ok": not wiring, "detail": wiring})
+            errors.extend("%s: %s" % (rel, w) for w in wiring)
 
     # structural checks on the files that define the harness + its UI
     if "scriptai2.py" in rels:
@@ -751,12 +1048,25 @@ Return ONE JSON object and nothing else:
           "replace": "<new bytes>", "why": "short reason"}],
  "restart": true}
 
+You do not have the whole file in front of you — only navigation maps. You may
+ask for the exact bytes of any region BEFORE proposing ops, and you should
+do that whenever you are not certain of the precise text:
+{"summary": "reading the phish routes", "read": ["scriptai2.py:5320-5370",
+                                                   "templates/index.html:492-531"],
+ "ops": []}
+A read request returns verbatim, line-numbered text and does not consume an
+iteration. The 'NNNNN| ' prefix is a line number and is NOT part of the file —
+never include it in "find".
+
 Rules that are enforced mechanically — a violation is rejected and retried:
 - Only these files may be edited: scriptai2.py, templates/index.html,
   apex_selfedit.py, apex_ops.py, apex_tools.py
 - "find" must be an exact, VERBATIM copy of a contiguous block of the current
-  file, at least 12 characters, and must occur EXACTLY ONCE. Copy it from the
-  excerpts below; never retype it from memory, never paraphrase whitespace.
+  file, at least 12 characters, and must occur EXACTLY ONCE. Copy it from text
+  that was actually shown to you; never retype it from memory and never
+  paraphrase whitespace. If you have not been shown it, use "read" first.
+- Matching ignores leading indentation as a fallback, and the replacement is
+  re-indented to the file's depth. A 'find' whose text is absent is rejected.
 - Include 2-6 surrounding lines in "find" when a single line is not unique.
 - Do not reindent or reformat code you are not changing.
 - "replace" must be a drop-in substitute for "find" (same indentation level).
@@ -765,6 +1075,29 @@ Rules that are enforced mechanically — a violation is rejected and retried:
 - templates/index.html is rendered by Jinja: do not introduce literal
   double-brace or brace-percent sequences (they would be parsed as template
   directives and break the page).
+- A UI change must be complete in one reply. If you add a button or link that
+  calls a function, add that function in the same change, and never reference
+  an element id that is not in the page: an unwired control is rejected.
+- An inline onclick/onchange attribute runs on window, so define its handler as
+  window.name = function (...) { ... } (or use addEventListener). A handler
+  declared only inside the page's (function(){ ... })() wrapper is rejected,
+  and so is a call to a helper that only lives in that wrapper (toast, log,
+  refresh, ...): those names do not exist outside it.
+- To add a UI handler, append a new <script> block using the TAIL section as
+  the anchor instead of editing inside the wrapper. Send exactly two lines of
+  "find" — the file's closing tags — and put your script before them:
+  find:    "</body>\n</html>"
+  replace: "<script>\nwindow.copyHealth = function () { ... };\n</script>\n</body>\n</html>"
+  That is the cheapest reliable edit; keep the new handler self-contained
+  (fetch plus DOM/clipboard calls), because the page's own helpers are private.
+- A handler that calls the server must use a method the route allows. @APP.route
+  alone is GET; posting to it fails with 405 and is rejected.
+- Never invent a block you have not been shown. A rejection tells you the exact
+  line that differs, and the real bytes around a rejected "find" are served
+  back to you automatically: copy them verbatim instead of retyping the same
+  block from memory, which is rejected again. To insert code, use as "find" a
+  block you have actually read and return it unchanged plus your new lines — do
+  not shorten "find" to the declaration line of a body you have never seen.
 - "restart": true unless the change only touches files that are re-read on every
   request.
 - If the request cannot be done with unique string replacements, return
@@ -783,10 +1116,10 @@ def _excerpts(rels):
             text = _read(rel)
         except Exception:
             continue
-        out.append("=== %s  (%d bytes, sha256 %s) ==="
-                   % (rel, len(text.encode("utf-8", "replace")),
-                      _sha(text.encode("utf-8", "replace"))[:12]))
         lines = text.splitlines()
+        out.append("=== %s  (%d bytes, %d lines, sha256 %s) ==="
+                   % (rel, len(text.encode("utf-8", "replace")), len(lines),
+                      _sha(text.encode("utf-8", "replace"))[:12]))
         if rel.endswith(".py"):
             routes = []
             for i, ln in enumerate(lines):
@@ -798,6 +1131,16 @@ def _excerpts(rels):
                             break
                     routes.append("  %5d  %s  ->  %s" % (i + 1, ln.strip(), nxt))
             out.append("ROUTE MAP:\n" + ("\n".join(routes) or "  (none)"))
+            # Navigation, not content: gives the model line numbers it can ask
+            # for by exact range instead of guessing a 'find' from memory.
+            symbols = []
+            for i, ln in enumerate(lines):
+                if re.match(r"^(def |class |async def )", ln):
+                    symbols.append("  %5d  %s" % (i + 1, ln.rstrip()[:90]))
+            if len(symbols) > 240:
+                symbols = symbols[:240] + ["  ... %d more" % (len(symbols) - 240)]
+            out.append("SYMBOL MAP (top-level only):\n"
+                       + ("\n".join(symbols) or "  (none)"))
             tail = lines[-18:]
             out.append("TAIL (lines %d-%d):\n%s"
                        % (max(1, len(lines) - 17), len(lines),
@@ -819,10 +1162,37 @@ def _excerpts(rels):
             disp = ["  %5d  %s" % (i + 1, ln.strip()) for i, ln in enumerate(lines)
                     if "dataset.tab ===" in ln]
             out.append("TAB DISPATCH:\n" + ("\n".join(disp) or "  (none)"))
+            js = []
+            for i, ln in enumerate(lines):
+                if re.match(r"\s*(function [A-Za-z0-9_$]+\(|const [A-Za-z0-9_$]+\s*=\s*"
+                            r"(async\s*)?\()", ln):
+                    js.append("  %5d  %s" % (i + 1, ln.strip()[:90]))
+            if js:
+                if len(js) > 120:
+                    js = js[:120] + ["  ... %d more" % (len(js) - 120)]
+                out.append("JS INDEX:\n" + "\n".join(js))
             cls = sorted(set(re.findall(r"^\s*\.([a-z][a-z0-9-]{2,})\s*[,{ ]",
                                         text, re.M)))
             out.append("CSS CLASSES: " + (", ".join(cls[:90]) or "(none)"))
     return "\n\n".join(out)
+
+
+def _op_recap(ops, limit=9):
+    """One line per op, so the retry prompt shows what the model already tried.
+
+    Without this the model re-planned from scratch after every rejection and
+    bounced between two different guesses instead of repairing the first one.
+    """
+    out = []
+    for i, o in enumerate(ops[:limit], 1):
+        if not isinstance(o, dict):
+            continue
+        lines = (o.get("find") or "").splitlines()
+        first = (lines[0] if lines else "")[:120]
+        out.append("  op %d (%s): find %d line(s) starting %r -> replace %d line(s)"
+                   % (i, _norm_rel(o.get("file")), len(lines), first,
+                      len((o.get("replace") or "").splitlines())))
+    return out
 
 
 def _messages(st):
@@ -832,13 +1202,21 @@ def _messages(st):
         "FILE INVENTORY:\n" + "\n".join(
             "  %-24s %8d bytes" % (r, len(_read(r).encode("utf-8", "replace")))
             for r in rels),
-        "EXCERPTS (copy 'find' from here, verbatim):\n" + _excerpts(rels),
+        "NAVIGATION MAPS (line numbers you can request by range):\n"
+        + _excerpts(rels),
     ]
+    if st.get("_ctx"):
+        parts.append("EXCERPTS YOU REQUESTED (exact bytes — copy 'find' from "
+                     "here):\n" + "\n\n".join(st["_ctx"]))
     hist = st.get("history") or []
     if hist:
         last = hist[-1]
         parts.append("YOUR PREVIOUS ATTEMPT WAS REJECTED — fix these and try again:\n"
                      + "\n".join("  - " + e for e in (last.get("errors") or [])[:12]))
+        if last.get("ops"):
+            parts.append("YOUR OWN LAST OPS (rejected — keep what was right and "
+                         "change only what the error names):\n"
+                         + "\n".join(last["ops"]))
         if last.get("summary"):
             parts.append("previous summary: " + str(last["summary"])[:400])
     parts.append("Return the JSON object now.")
@@ -913,6 +1291,12 @@ def parse_reply(text):
     if not isinstance(ops, list):
         return None, "'ops' is not a list"
     obj["ops"] = ops
+    reads = obj.get("read") or obj.get("reads") or []
+    if isinstance(reads, str):
+        reads = [reads]
+    if not isinstance(reads, list):
+        return None, "'read' is not a list"
+    obj["read"] = [str(r) for r in reads if str(r).strip()]
     return obj, None
 
 
@@ -980,18 +1364,58 @@ def _worker(st):
                 manual = None
                 err = None
             else:
-                text, err = _ask(_messages(st))
-                if err:
-                    st["error"] = err
+                # The model may answer with {"read": [...]}, which returns exact
+                # bytes and does not consume an iteration. Bounded so a model
+                # that only ever reads still terminates.
+                obj = None
+                for rd in range(MAX_READS + 1):
+                    if _STOP.is_set():
+                        _phase(st, "stopped", "stopped while reading")
+                        return
+                    text, err = _ask(_messages(st))
+                    if err:
+                        st["error"] = err
+                        st.setdefault("history", []).append(
+                            {"iteration": it, "ok": False, "errors": [err]})
+                        _phase(st, "failed", "model unavailable: %s" % err)
+                        return
+                    obj, perr = parse_reply(text)
+                    if perr:
+                        st.setdefault("history", []).append(
+                            {"iteration": it, "ok": False, "errors": [perr]})
+                        _log(st, "WARN", "iteration %d rejected: %s" % (it, perr))
+                        break
+                    want = obj.get("read") or []
+                    if not want or obj.get("ops"):
+                        break
+                    if rd >= MAX_READS:
+                        msg = ("the model spent all %d read requests without "
+                               "proposing an edit" % MAX_READS)
+                        st.setdefault("history", []).append(
+                            {"iteration": it, "ok": False, "errors": [msg]})
+                        st["error"] = msg
+                        _phase(st, "failed", msg)
+                        return
+                    st["reads"] = int(st.get("reads") or 0) + 1
+                    _phase(st, "planning", "iteration %d/%d — model requested %s"
+                           % (it, st.get("max_iters"), ", ".join(want)[:160]))
+                    block, notes = read_ranges(want)
+                    ctx = st.setdefault("_ctx", [])
+                    if block:
+                        ctx.append(block)
+                    for note in notes:
+                        ctx.append("READ NOTICE: " + str(note)[:300])
+                    del ctx[:-READ_KEEP]
+                    _log(st, "INFO", "iteration %d — served %d line(s) of source "
+                         "for %d range(s)" % (it, block.count("\n") + 1 if block else 0,
+                                              len(want)))
+                    _save(st)
+                if perr or not isinstance(obj, dict):
+                    continue
+                if not obj.get("ops"):
                     st.setdefault("history", []).append(
-                        {"iteration": it, "ok": False, "errors": [err]})
-                    _phase(st, "failed", "model unavailable: %s" % err)
-                    return
-                obj, perr = parse_reply(text)
-                if perr:
-                    st.setdefault("history", []).append(
-                        {"iteration": it, "ok": False, "errors": [perr]})
-                    _log(st, "WARN", "iteration %d rejected: %s" % (it, perr))
+                        {"iteration": it, "ok": False,
+                         "errors": ["no ops returned"]})
                     continue
             st["summary"] = str(obj.get("summary") or "")[:400]
             ops = obj.get("ops") or []
@@ -1009,9 +1433,13 @@ def _worker(st):
             if not res["ok"]:
                 st.setdefault("history", []).append(
                     {"iteration": it, "ok": False, "errors": res["errors"],
-                     "summary": st.get("summary")})
+                     "ops": _op_recap(ops), "summary": st.get("summary")})
                 _log(st, "WARN", "iteration %d ops rejected: %s"
                      % (it, "; ".join(res["errors"])[:300]))
+                served = _serve_misses(st, res.get("misses"))
+                if served:
+                    _log(st, "INFO", "iteration %d — auto-served %d line(s) of "
+                         "the file around the missed 'find'" % (it, served))
                 if st.get("manual"):
                     # Operator-supplied ops: no point asking the model to
                     # reinterpret them, so report what was wrong and stop.
@@ -1037,7 +1465,8 @@ def _worker(st):
                 rep = restore(dest, rels)
                 st.setdefault("history", []).append(
                     {"iteration": it, "ok": False, "errors": val["errors"],
-                     "summary": st.get("summary"), "restored": rep})
+                     "ops": _op_recap(ops), "summary": st.get("summary"),
+                     "restored": rep})
                 st["files_changed"] = []
                 st["diff"] = ""
                 _log(st, "WARN", "iteration %d failed validation and was rolled "
@@ -1188,7 +1617,7 @@ def start(payload):
             "validation": None, "error": None, "history": [], "log": [],
             "summary": str(payload.get("summary") or ""),
             "boots": 0, "awaiting_boot": False,
-            "manifest": man,
+            "manifest": man, "_ctx": [], "reads": 0,
         })
         if ops:
             st["manual_ops"] = ops
