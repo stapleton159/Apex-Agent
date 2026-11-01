@@ -1015,3 +1015,249 @@ def call(action, args=None):
 
 if __name__ == "__main__":
     print(json.dumps(doctor(), indent=2))
+d or "#include <iostream>" in head or "using namespace std" in head:
+            return "cpp"
+        return "c"
+    if ".global _start" in head or ".section .text" in head or "section .text" in head:
+        return "asm"
+    if ("def " in head and ":" in head) or "import " in head or "print(" in head:
+        return "py"
+    if "function " in head or "=>" in head or "const " in head or "require(" in head:
+        return "js"
+    if head.startswith("export ") or "$(dirname" in head or "if [ " in head:
+        return "sh"
+    return None
+
+
+def _lang_of(name):
+    for tag, ext in sorted(EXT.items(), key=lambda kv: -len(kv[1])):
+        if str(name).endswith(ext):
+            return tag
+    return None
+
+
+def _fname_for(name, lang):
+    if _lang_of(name):
+        return name
+    return str(name) + EXT.get(lang, ".txt")
+
+
+def build(name, lang=None, flags=None, src=None):
+    try:
+        d = _safe(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    files = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f))] if os.path.isdir(d) else []
+    if src:
+        source = os.path.join(d, src)
+    else:
+        # newest source wins, so a revised file rebuilds without renaming
+        cands = [os.path.join(d, f) for f in files
+                 if _lang_of(f) and f != name + ".bin"]
+        if not cands:
+            return {"ok": False, "error": "no source in lab entry", "files": files}
+        source = max(cands, key=lambda p: os.path.getmtime(p))
+    lang = (lang or _lang_of(source) or "txt").lower()
+    if lang not in COMPILERS:
+        return {"ok": False, "error": f"cannot build {lang}", "buildable": sorted(COMPILERS)}
+    cmd_t, tools = COMPILERS[lang]
+    cc = _which(tools)
+    if not cc:
+        return {"ok": False, "error": f"no compiler for {lang}", "looked_for": tools,
+                "hint": "provision one, or write a script instead"}
+    out = os.path.join(d, name + ".bin")
+    cmd = cmd_t.format(cc=cc, src=source, out=out)
+    if flags:
+        cmd = cmd.replace("-O2", "-O2 " + " ".join(str(flags).split())[:300], 1)
+    t0 = time.time()
+    try:
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "compiler timed out after 180s", "cmd": cmd}
+    ms = int((time.time() - t0) * 1000)
+    if p.returncode != 0 or not os.path.exists(out):
+        return {"ok": False, "error": "build failed", "cmd": cmd, "rc": p.returncode,
+                "stderr": (p.stderr or p.stdout or "")[-3000:]}
+    try:
+        os.chmod(out, 0o755)
+    except OSError:
+        pass
+    return {"ok": True, "artifact": out, "cmd": cmd, "ms": ms,
+            "bytes": os.path.getsize(out), "sha256": _sha(out),
+            "warnings": (p.stderr or "").strip()[-1200:]}
+
+
+def _sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def artifact(name):
+    d = _safe(name)
+    out = os.path.join(d, name + ".bin")
+    if os.path.exists(out):
+        return out
+    raise ValueError("no artifact yet: build first")
+
+
+def run(name, args=None, timeout=10, env_extra=None):
+    """Execute a built artifact with a hard timeout. Output is captured."""
+    try:
+        d = _safe(name)
+        path = artifact(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    argv = [path] + ([str(a) for a in args] if isinstance(args, list)
+                     else (str(args).split() if args else []))
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    t0 = time.time()
+    try:
+        p = subprocess.run(argv, cwd=d, capture_output=True, text=True,
+                           timeout=max(1, min(int(timeout), 60)), env=env,
+                           input="")
+    except subprocess.TimeoutExpired as e:
+        return {"ok": True, "timed_out": True, "ms": int((time.time() - t0) * 1000),
+                "stdout": (e.stdout or b"").decode("utf-8", "replace")
+                if isinstance(e.stdout, bytes) else (e.stdout or ""),
+                "stderr": "killed after timeout",
+                "note": "a timeout is normal for a listener or long-running implant"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "timed_out": False, "rc": p.returncode,
+            "ms": int((time.time() - t0) * 1000),
+            "stdout": (p.stdout or "")[-4000:], "stderr": (p.stderr or "")[-2000:]}
+
+
+def inspect(name):
+    try:
+        path = artifact(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    out = {"ok": True, "path": path, "bytes": os.path.getsize(path),
+           "sha256": _sha(path)}
+    for tool, args in (("file", [path]), ("readelf", ["-h", path]),
+                       ("objdump", ["-f", path]), ("strings", ["-n", "6", path])):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        try:
+            p = subprocess.run([exe] + args, capture_output=True, text=True, timeout=30)
+            out[tool] = (p.stdout or p.stderr or "")[:2500]
+        except Exception:
+            pass
+    return out
+
+
+def pack(name, key=0x5A):
+    """XOR + base64 an artifact, and emit the C array the crypter template eats."""
+    try:
+        path = artifact(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    data = open(path, "rb").read()
+    k = int(key) & 0xFF
+    enc = bytes(b ^ k for b in data)
+    arr = ",".join("0x%02x" % b for b in enc[:4096])
+    return {"ok": True, "artifact": path, "key": k, "in_bytes": len(data),
+            "b64": base64.b64encode(enc).decode(),
+            "c_array": "{ " + arr + " }" if arr else "{}",
+            "truncated_array": len(data) > 4096}
+
+
+def list_lab():
+    root = _root()
+    out = []
+    for n in sorted(os.listdir(root)):
+        d = os.path.join(root, n)
+        if not os.path.isdir(d):
+            continue
+        files = []
+        for f in sorted(os.listdir(d)):
+            p = os.path.join(d, f)
+            if os.path.isfile(p):
+                files.append({"name": f, "bytes": os.path.getsize(p),
+                              "mtime": time.strftime("%m-%d %H:%M",
+                                                     time.localtime(os.path.getmtime(p)))})
+        art = os.path.join(d, n + ".bin")
+        out.append({"name": n, "files": files,
+                    "built": os.path.exists(art),
+                    "artifact_bytes": os.path.getsize(art) if os.path.exists(art) else 0})
+    return {"ok": True, "lab_dir": root, "entries": out}
+
+
+def read(name, file=None, max_bytes=200000):
+    try:
+        d = _safe(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if file:
+        p = os.path.realpath(os.path.join(d, file))
+        if not p.startswith(d + os.sep):
+            return {"ok": False, "error": "path escapes the lab entry"}
+    else:
+        cands = [os.path.join(d, f) for f in os.listdir(d) if _lang_of(f)]
+        if not cands:
+            return {"ok": False, "error": "no source file"}
+        p = max(cands, key=os.path.getmtime)
+    if not os.path.exists(p):
+        return {"ok": False, "error": f"missing {p}"}
+    with open(p, "rb") as f:
+        data = f.read(max_bytes)
+    return {"ok": True, "path": p, "text": data.decode("utf-8", "replace")}
+
+
+def delete(name):
+    try:
+        d = _safe(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if not os.path.isdir(d):
+        return {"ok": False, "error": "no such lab entry"}
+    shutil.rmtree(d)
+    return {"ok": True, "deleted": name}
+
+
+def call(action, args=None):
+    """Dispatcher used by the agent tool layer and the HTTP routes."""
+    args = args if isinstance(args, dict) else {}
+    action = (args.get("action") or action or "list").lower()
+    try:
+        if action in ("doctor", "env", "status"):
+            return doctor()
+        if action in ("write", "create", "new"):
+            return write(args.get("name") or args.get("title"),
+                         source=args.get("source") or args.get("code"),
+                         template=args.get("template"), lang=args.get("lang"))
+        if action in ("build", "compile", "make"):
+            return build(args.get("name"), args.get("lang"), args.get("flags"),
+                         args.get("src"))
+        if action in ("run", "exec", "test"):
+            return run(args.get("name"), args.get("args"),
+                       args.get("timeout") or 10)
+        if action in ("inspect", "analyze", "info"):
+            return inspect(args.get("name"))
+        if action in ("pack", "encode", "crypt"):
+            return pack(args.get("name"), args.get("key") or 0x5A)
+        if action in ("list", "ls"):
+            return list_lab()
+        if action in ("read", "cat", "show"):
+            return read(args.get("name"), args.get("file"))
+        if action in ("delete", "rm"):
+            return delete(args.get("name"))
+        if action in ("templates", "tpl"):
+            return {"ok": True, "templates": [
+                {"name": k, "lang": v[0], "file": v[1], "why": v[3]}
+                for k, v in sorted(TEMPLATES.items())]}
+        return {"ok": False, "error": f"unknown lab action {action}",
+                "valid": ["doctor", "write", "build", "run", "inspect", "pack",
+                          "list", "read", "delete", "templates"]}
+    except Exception as e:
+        return {"ok": False, "error": f"lab {action} failed: {type(e).__name__}: {e}"}
+
+
+if __name__ == "__main__":
+    print(json.dumps(doctor(), indent=2))
